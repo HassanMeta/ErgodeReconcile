@@ -1822,29 +1822,22 @@ def render_reco() -> None:
         results_base["CC_Txn_Date_dt"] = pd.to_datetime(
             results_base["CC_Txn_Date"], dayfirst=True, errors="coerce"
         )
-        payment_terms_norm = (
-            results_base["Payment_Terms"].astype(str).str.strip().str.lower()
+        # Convert Payment_Terms to numeric, defaulting to 0 for missing/null values
+        results_base["Payment_Terms_Numeric"] = pd.to_numeric(
+            results_base["Payment_Terms"], errors="coerce"
+        ).fillna(0)
+        # Calculate date window: Start = T - Payment_Terms - grace_days
+        # End = T + grace_days (only if Payment_Terms = 0), else End = T
+        results_base["Window_Start"] = (
+            results_base["CC_Txn_Date_dt"]
+            - pd.to_timedelta(results_base["Payment_Terms_Numeric"], unit="D")
+            - pd.Timedelta(days=grace_days)
         )
-        results_base["Window_Start"] = results_base["CC_Txn_Date_dt"] - pd.Timedelta(
-            days=grace_days
+        # Add grace_days to end date only when Payment_Terms is 0
+        results_base["Window_End"] = results_base["CC_Txn_Date_dt"].where(
+            results_base["Payment_Terms_Numeric"] > 0,
+            results_base["CC_Txn_Date_dt"] + pd.Timedelta(days=grace_days),
         )
-        results_base["Window_End"] = results_base["CC_Txn_Date_dt"] + pd.Timedelta(
-            days=grace_days
-        )
-        net10_mask = payment_terms_norm == "net 10"
-        results_base.loc[net10_mask, "Window_Start"] = results_base.loc[
-            net10_mask, "CC_Txn_Date_dt"
-        ] - pd.Timedelta(days=10 + grace_days)
-        results_base.loc[net10_mask, "Window_End"] = results_base.loc[
-            net10_mask, "CC_Txn_Date_dt"
-        ]
-        prepay_mask = payment_terms_norm == "pre_payment"
-        results_base.loc[prepay_mask, "Window_Start"] = results_base.loc[
-            prepay_mask, "CC_Txn_Date_dt"
-        ] - pd.Timedelta(days=grace_days)
-        results_base.loc[prepay_mask, "Window_End"] = results_base.loc[
-            prepay_mask, "CC_Txn_Date_dt"
-        ] + pd.Timedelta(days=grace_days)
         results_df = (
             results_base.groupby(results_group_cols)
             .agg(
