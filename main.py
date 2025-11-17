@@ -59,7 +59,13 @@ def write_parquet(df: pd.DataFrame, file_path: Path) -> None:
     """
     parquet_path = file_path.with_suffix(".parquet")
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(parquet_path, engine="pyarrow", index=False)
+    # Convert Payment_Terms to numeric if it exists to avoid type conversion errors
+    df_to_write = df.copy()
+    if "Payment_Terms" in df_to_write.columns:
+        df_to_write["Payment_Terms"] = pd.to_numeric(
+            df_to_write["Payment_Terms"], errors="coerce"
+        )
+    df_to_write.to_parquet(parquet_path, engine="pyarrow", index=False)
 
     # Optionally remove old CSV file if it exists
     csv_path = file_path.with_suffix(".csv")
@@ -76,10 +82,21 @@ def apply_custom_css():
     st.markdown(
         """
         <style>
+        /* Force dark mode - override system theme */
+        :root {
+            --background-color: #0e1117 !important;
+            --text-color: #fafafa !important;
+        }
+
         /* Main theme - Dark mode */
         .stApp {
-            background-color: #0e1117;
-            color: #fafafa;
+            background-color: #0e1117 !important;
+            color: #fafafa !important;
+        }
+
+        /* Force dark mode on all Streamlit elements */
+        [data-testid="stAppViewContainer"] {
+            background-color: #0e1117 !important;
         }
 
         /* Main headers */
@@ -1345,13 +1362,13 @@ def render_cc_data() -> None:
                             if "DEPT" in master_trim.columns
                             else {}
                         )
-                        prefix_terms_map = (
-                            master_trim.get(
-                                "PAYMENT TERMS", pd.Series(dtype=str)
-                            ).to_dict()
-                            if "PAYMENT TERMS" in master_trim.columns
-                            else {}
-                        )
+                        prefix_terms_map = {}
+                        if "PAYMENT TERMS" in master_trim.columns:
+                            # Convert to numeric before creating dict to ensure proper type
+                            terms_series = pd.to_numeric(
+                                master_trim["PAYMENT TERMS"], errors="coerce"
+                            ).fillna(0)
+                            prefix_terms_map = terms_series.to_dict()
                         prefix_vendor_name_map = (
                             master_trim["VENDOR_NAME"].to_dict()
                             if "VENDOR_NAME" in master_trim.columns
@@ -1371,8 +1388,14 @@ def render_cc_data() -> None:
                         reco_df["Category"] = reco_df["Category"].fillna("Unmapped")
 
                         reco_df["Dept"] = reco_df["Vendor_Prefix"].map(prefix_dept_map)
-                        reco_df["Payment_Terms"] = reco_df["Vendor_Prefix"].map(
-                            prefix_terms_map
+                        reco_df["Payment_Terms"] = (
+                            reco_df["Vendor_Prefix"]
+                            .map(prefix_terms_map)
+                            .apply(
+                                lambda x: pd.to_numeric(x, errors="coerce")
+                                if pd.notna(x)
+                                else 0
+                            )
                         )
                         reco_df.loc[
                             reco_df["Vendor_Prefix"] == "",
@@ -1873,6 +1896,12 @@ def render_reco() -> None:
             window_cols = window_cols.dropna(
                 subset=["CC_Txn_Date_dt", "Window_Start", "Window_End"]
             )
+            # Deduplicate by grouping columns to avoid counting PO amounts multiple times
+            # when there are multiple CC transactions for the same vendor/date/dept/payment terms
+            if not window_cols.empty:
+                window_cols = window_cols.drop_duplicates(
+                    subset=results_group_cols, keep="first"
+                )
             if not window_cols.empty and not po_df.empty:
                 po_merge = window_cols.merge(
                     po_df[["Vendor_Prefix", "PO_Date", "PO_Amount", "PO_Number"]],
@@ -2527,9 +2556,17 @@ def render_reco() -> None:
                             if "Dept" in new_row:
                                 new_row["Dept"] = dept_value
                             if "Payment_Terms" in new_row:
-                                new_row["Payment_Terms"] = payment_terms_value
+                                new_row["Payment_Terms"] = (
+                                    pd.to_numeric(payment_terms_value, errors="coerce")
+                                    if pd.notna(payment_terms_value)
+                                    else 0
+                                )
                             if "PAYMENT TERMS" in new_row:
-                                new_row["PAYMENT TERMS"] = payment_terms_value
+                                new_row["PAYMENT TERMS"] = (
+                                    pd.to_numeric(payment_terms_value, errors="coerce")
+                                    if pd.notna(payment_terms_value)
+                                    else 0
+                                )
                             if "Reco_ID" in new_row:
                                 new_row["Reco_ID"] = reco_id_value
 
@@ -3353,15 +3390,21 @@ def render_reco() -> None:
                                         )
                                     if "Payment_Terms" in reco_df.columns:
                                         reco_df.loc[mask, "Payment_Terms"] = (
-                                            payment_terms_value
-                                            if payment_terms_value
-                                            else pd.NA
+                                            pd.to_numeric(
+                                                payment_terms_value, errors="coerce"
+                                            )
+                                            if pd.notna(payment_terms_value)
+                                            and payment_terms_value
+                                            else 0
                                         )
                                     if "PAYMENT TERMS" in reco_df.columns:
                                         reco_df.loc[mask, "PAYMENT TERMS"] = (
-                                            payment_terms_value
-                                            if payment_terms_value
-                                            else pd.NA
+                                            pd.to_numeric(
+                                                payment_terms_value, errors="coerce"
+                                            )
+                                            if pd.notna(payment_terms_value)
+                                            and payment_terms_value
+                                            else 0
                                         )
 
                                     updates_applied.append(
