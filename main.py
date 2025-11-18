@@ -1012,8 +1012,8 @@ def render_po_data() -> None:
     # Use dynamic key based on upload counter to force reset after upload
     upload_counter = st.session_state.get("po_upload_counter", 0)
     uploaded_file = st.file_uploader(
-        "Upload CSV or Excel with PO records",
-        type=["csv", "xlsx", "xls"],
+        "Upload CSV with PO records",
+        type=["csv"],
         accept_multiple_files=False,
         help="Only the required fields will be imported; extra columns are ignored.",
         key=f"po_uploaded_file_{upload_counter}",
@@ -1381,7 +1381,12 @@ def render_cc_data() -> None:
                         st.error(f"Unable to load mapping data: {exc}")
                     else:
                         mappings_df["DESCRIPTION"] = (
-                            mappings_df["DESCRIPTION"].astype(str).str.strip()
+                            mappings_df["DESCRIPTION"]
+                            .astype(str)
+                            .str.replace(
+                                r"\s+", " ", regex=True
+                            )  # Normalize multiple spaces
+                            .str.strip()
                         )
                         mappings_df["_norm_description"] = mappings_df[
                             "DESCRIPTION"
@@ -1390,6 +1395,9 @@ def render_cc_data() -> None:
                         batch_df["_norm_description"] = (
                             batch_df["CC_Description"]
                             .astype(str)
+                            .str.replace(
+                                r"\s+", " ", regex=True
+                            )  # Normalize multiple spaces
                             .str.strip()
                             .str.upper()
                         )
@@ -1538,8 +1546,8 @@ def render_cc_data() -> None:
     # Use dynamic key based on upload counter to force reset after upload
     upload_counter = st.session_state.get("cc_upload_counter", 0)
     uploaded_file = st.file_uploader(
-        "Upload CSV or Excel with credit card records",
-        type=["csv", "xlsx", "xls"],
+        "Upload CSV with credit card records",
+        type=["csv"],
         accept_multiple_files=False,
         help="Only the required fields will be imported; extra columns are ignored.",
         key=f"cc_uploaded_file_{upload_counter}",
@@ -1629,6 +1637,17 @@ def render_cc_data() -> None:
             # Clean up null representations
             aligned_df[col] = aligned_df[col].replace("nan", "").replace("None", "")
 
+    # Clean CC_Description: normalize multiple spaces to single space
+    if "CC_Description" in aligned_df.columns:
+        # Replace multiple spaces (2 or more) with single space
+        aligned_df["CC_Description"] = (
+            aligned_df["CC_Description"]
+            .str.replace(
+                r"\s+", " ", regex=True
+            )  # Replace multiple spaces with single space
+            .str.strip()  # Remove leading/trailing spaces
+        )
+
     # Validate CC_Number
     if "CC_Number" in aligned_df.columns:
         if (
@@ -1665,15 +1684,12 @@ def render_cc_data() -> None:
             "Unable to parse CC_Txn_Date for all rows. Please ensure the dates are valid."
         )
         return
-    unique_dates = aligned_df["CC_Txn_Date"].dt.date.dropna().unique()
-    if len(unique_dates) > 1:
-        formatted_dates = ", ".join(sorted({date.isoformat() for date in unique_dates}))
-        st.error(
-            "Import aborted. All rows in a single upload must share the same CC_Txn_Date. "
-            "Please adjust the file to contain only one transaction date. "
-            f"Detected dates: {formatted_dates}"
-        )
-        return
+
+    # Group by date to create separate batches for each date
+    aligned_df["_date_group"] = aligned_df["CC_Txn_Date"].dt.date
+    unique_dates = aligned_df["_date_group"].dropna().unique()
+
+    # Convert date back to string format for storage
     aligned_df["CC_Txn_Date"] = aligned_df["CC_Txn_Date"].dt.strftime("%Y-%m-%d")
 
     aligned_df["CC_Amt"] = pd.to_numeric(aligned_df["CC_Amt"], errors="coerce")
@@ -1688,19 +1704,6 @@ def render_cc_data() -> None:
         if not existing_df.empty
         else []
     )
-    incoming_references = aligned_df["CC_Reference_ID"].tolist()
-    duplicate_existing_refs = sorted(
-        set(incoming_references).intersection(existing_references)
-    )
-    if duplicate_existing_refs:
-        preview = ", ".join(duplicate_existing_refs[:10])
-        suffix = "..." if len(duplicate_existing_refs) > 10 else ""
-        st.error(
-            "Import aborted. The following CC_Reference_ID values already exist: "
-            + preview
-            + suffix
-        )
-        return
 
     # Extract last 4 digits from CC_Number for batch ID
     def get_cc_last4(cc_number):
@@ -1715,37 +1718,83 @@ def render_cc_data() -> None:
         # If less than 4 digits, pad with zeros
         return digits_only.zfill(4)[-4:]
 
-    # Get the most common CC number's last 4 digits (or first if all unique)
-    if "CC_Number" in aligned_df.columns:
-        cc_numbers = aligned_df["CC_Number"].dropna()
-        if not cc_numbers.empty:
-            # Get the most common CC number, or first if all are unique
-            cc_number_counts = cc_numbers.value_counts()
-            most_common_cc = (
-                cc_number_counts.index[0] if len(cc_number_counts) > 0 else None
+    # Process each date group separately to create batches per date
+    all_batches = []
+    combined_df = existing_df.copy()
+    base_timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    batch_counter = 0
+
+    for date_group in sorted(unique_dates):
+        date_df = aligned_df[aligned_df["_date_group"] == date_group].copy()
+
+        # Check for duplicate references within this date group
+        incoming_references = date_df["CC_Reference_ID"].tolist()
+        duplicate_existing_refs = sorted(
+            set(incoming_references).intersection(existing_references)
+        )
+        if duplicate_existing_refs:
+            preview = ", ".join(duplicate_existing_refs[:10])
+            suffix = "..." if len(duplicate_existing_refs) > 10 else ""
+            st.warning(
+                f"Skipping date {date_group.isoformat()}. The following CC_Reference_ID values already exist: "
+                + preview
+                + suffix
             )
-            cc_last4 = (
-                get_cc_last4(most_common_cc) if most_common_cc is not None else "0000"
-            )
+            continue
+
+        # Get the most common CC number's last 4 digits for this date group
+        if "CC_Number" in date_df.columns:
+            cc_numbers = date_df["CC_Number"].dropna()
+            if not cc_numbers.empty:
+                cc_number_counts = cc_numbers.value_counts()
+                most_common_cc = (
+                    cc_number_counts.index[0] if len(cc_number_counts) > 0 else None
+                )
+                cc_last4 = (
+                    get_cc_last4(most_common_cc)
+                    if most_common_cc is not None
+                    else "0000"
+                )
+            else:
+                cc_last4 = "0000"
         else:
             cc_last4 = "0000"
-    else:
-        cc_last4 = "0000"
 
-    base_batch_id = datetime.utcnow().strftime("CCBATCH-%Y%m%d-%H%M%S")
-    batch_id = f"{base_batch_id}-{cc_last4}"
-    aligned_df["Import_Batch_ID"] = batch_id
-    aligned_df["Reco_ID"] = pd.NA
+        # Create batch ID with timestamp, counter, and date suffix for uniqueness
+        batch_counter += 1
+        date_suffix = date_group.strftime("%Y%m%d")  # Add date to batch ID for clarity
+        batch_id = (
+            f"CCBATCH-{base_timestamp}-{batch_counter:02d}-{cc_last4}-{date_suffix}"
+        )
 
-    combined_df = pd.concat(
-        [existing_df, aligned_df],
-        ignore_index=True,
-    )
+        date_df["Import_Batch_ID"] = batch_id
+        date_df["Reco_ID"] = pd.NA
+        date_df = date_df.drop(columns=["_date_group"])  # Remove temporary column
+
+        # Append to combined dataframe
+        combined_df = pd.concat(
+            [combined_df, date_df],
+            ignore_index=True,
+        )
+
+        all_batches.append(batch_id)
+        # Update existing_references to include newly added ones
+        existing_references.extend(incoming_references)
+
+    if not all_batches:
+        st.error("No batches were created. All dates contained duplicate references.")
+        return
+
     write_parquet(combined_df, cc_path)
 
-    st.session_state["cc_upload_success"] = (
-        f"New credit card records appended (batch {batch_id})."
-    )
+    # Create success message with all batches
+    if len(all_batches) == 1:
+        batch_message = f"New credit card records appended (batch {all_batches[0]})."
+    else:
+        batch_list = ", ".join(all_batches)
+        batch_message = f"Created {len(all_batches)} batches for {len(unique_dates)} date(s): {batch_list}"
+
+    st.session_state["cc_upload_success"] = batch_message
     st.session_state["cc_just_uploaded"] = True
     # Clear form keys to reset the form
     for field in mapping_fields:
@@ -2407,7 +2456,12 @@ def render_reco() -> None:
                     if mappings_df is not None and master_df is not None:
                         # Process auto-FBM rows directly (same logic as below)
                         mappings_df["DESCRIPTION"] = (
-                            mappings_df["DESCRIPTION"].astype(str).str.strip()
+                            mappings_df["DESCRIPTION"]
+                            .astype(str)
+                            .str.replace(
+                                r"\s+", " ", regex=True
+                            )  # Normalize multiple spaces
+                            .str.strip()
                         )
                         mappings_df["_norm_description"] = mappings_df[
                             "DESCRIPTION"
