@@ -59,12 +59,45 @@ def write_parquet(df: pd.DataFrame, file_path: Path) -> None:
     """
     parquet_path = file_path.with_suffix(".parquet")
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
-    # Convert Payment_Terms to numeric if it exists to avoid type conversion errors
+    # Convert columns to proper types to avoid type conversion errors
     df_to_write = df.copy()
+
+    # Convert Payment_Terms to numeric if it exists
     if "Payment_Terms" in df_to_write.columns:
         df_to_write["Payment_Terms"] = pd.to_numeric(
             df_to_write["Payment_Terms"], errors="coerce"
         )
+
+    # Convert string columns to ensure they're not mixed types (bool, int, etc.)
+    string_columns = [
+        "Vendor_Prefix",
+        "Vendor_Name",
+        "Category",
+        "Dept",
+        "PO_Number",
+        "CC_Number",
+        "CC_Description",
+        "CC_Reference_ID",
+        "Import_Batch_ID",
+        "Reco_ID",
+        "PREFIX",
+        "VENDOR_NAME",
+        "CATEGORY",
+        "DEPT",
+        "DESCRIPTION",
+    ]
+    for col in string_columns:
+        if col in df_to_write.columns:
+            # Convert to object type first to handle mixed types (bool, int, float, str)
+            # Then convert to string, which will handle all types properly
+            df_to_write[col] = df_to_write[col].astype(object)
+            # Convert all values to string, preserving NaN
+            df_to_write[col] = df_to_write[col].astype(str)
+            # Clean up string representations of nulls and convert back to proper nulls
+            null_strings = ["nan", "None", "<NA>", "NaT", ""]
+            for null_str in null_strings:
+                df_to_write[col] = df_to_write[col].replace(null_str, pd.NA)
+
     df_to_write.to_parquet(parquet_path, engine="pyarrow", index=False)
 
     # Optionally remove old CSV file if it exists
@@ -1065,6 +1098,26 @@ def render_po_data() -> None:
     aligned_df = pd.DataFrame(
         {field: incoming_df[mapping[field]] for field in mapping_fields}
     )
+    # Ensure all string columns are properly typed to avoid type conversion errors
+    # Convert all string columns to handle mixed types (bool, int, float, str)
+    # Note: PO_Date will be converted to datetime later, but we ensure it's string-safe here
+    po_string_columns = ["Vendor_Prefix", "PO_Number"]
+    for col in po_string_columns:
+        if col in aligned_df.columns:
+            # Convert to object first to handle mixed types, then to string
+            aligned_df[col] = aligned_df[col].astype(object).astype(str).str.strip()
+            # Clean up null representations
+            aligned_df[col] = aligned_df[col].replace("nan", "").replace("None", "")
+
+    # PO_Date - convert to string first (will be converted to datetime in write_parquet if needed)
+    if "PO_Date" in aligned_df.columns:
+        aligned_df["PO_Date"] = (
+            aligned_df["PO_Date"].astype(object).astype(str).str.strip()
+        )
+        aligned_df["PO_Date"] = (
+            aligned_df["PO_Date"].replace("nan", "").replace("None", "")
+        )
+
     aligned_df["Dept"] = dept_value
     batch_id = datetime.utcnow().strftime("BATCH-%Y%m%d-%H%M%S")
     aligned_df["Import_Batch_ID"] = batch_id
@@ -1566,9 +1619,18 @@ def render_cc_data() -> None:
         {field: incoming_df[mapping[field]] for field in mapping_fields}
     )
 
+    # Ensure all string columns are properly typed to avoid type conversion errors
+    # Convert all string columns to handle mixed types (bool, int, float, str)
+    cc_string_columns = ["CC_Number", "CC_Description", "CC_Reference_ID"]
+    for col in cc_string_columns:
+        if col in aligned_df.columns:
+            # Convert to object first to handle mixed types, then to string
+            aligned_df[col] = aligned_df[col].astype(object).astype(str).str.strip()
+            # Clean up null representations
+            aligned_df[col] = aligned_df[col].replace("nan", "").replace("None", "")
+
     # Validate CC_Number
     if "CC_Number" in aligned_df.columns:
-        aligned_df["CC_Number"] = aligned_df["CC_Number"].astype(str).str.strip()
         if (
             aligned_df["CC_Number"].isna().any()
             or (aligned_df["CC_Number"] == "").any()
@@ -1578,10 +1640,6 @@ def render_cc_data() -> None:
     else:
         st.error("CC_Number field is required but not found in the mapped data.")
         return
-
-    aligned_df["CC_Reference_ID"] = (
-        aligned_df["CC_Reference_ID"].astype(str).str.strip()
-    )
     if (
         aligned_df["CC_Reference_ID"].isna().any()
         or (aligned_df["CC_Reference_ID"] == "").any()

@@ -1,0 +1,294 @@
+================================================================================
+    HOW TO RECONCILE CREDIT CARD TRANSACTIONS - USER GUIDE
+================================================================================
+
+This guide will help you match your credit card transactions with purchase
+orders using the Ergode Reconciliation System.
+
+================================================================================
+WHAT YOU NEED BEFORE STARTING
+================================================================================
+
+1. Your credit card statement file (CSV or Excel format)
+   - Must have: Transaction Date, Card Number, Description, Amount,
+     and a unique Reference ID for each transaction
+
+2. Your purchase order file (CSV or Excel format)
+   - Must have: PO Date, PO Number, Vendor Code, PO Amount
+
+3. Vendor master data should already be set up in the system
+   (Contact your administrator if this is not done)
+
+================================================================================
+STEP 1: UPLOAD YOUR PURCHASE ORDERS
+================================================================================
+
+1. Click on "PO Data" in the left sidebar menu
+
+2. Prepare your purchase order file:
+   Your Excel or CSV file should have columns like:
+   - Date of the purchase order
+   - PO number
+   - Vendor code (must match vendor codes in the system)
+   - Amount of the purchase order
+
+3. Click the "Upload CSV or Excel with PO records" button
+
+4. Select your file from your computer
+
+5. The system will show you a preview of your file
+
+6. Map your columns:
+   - For each required field, select which column in your file contains that information
+   - Example: If your file has "Order Date", select it for "PO_Date"
+   - Example: If your file has "Vendor Code", select it for "Vendor_Prefix"
+
+7. Click "Import PO Data" button
+
+8. You should see a success message and your data will appear in the table
+
+================================================================================
+STEP 2: UPLOAD YOUR CREDIT CARD TRANSACTIONS
+================================================================================
+
+1. Click on "CC Data" in the left sidebar menu
+
+2. Prepare your credit card file:
+   Your Excel or CSV file should have columns like:
+   - Transaction date
+   - Credit card number
+   - Transaction description (what shows on your statement)
+   - Transaction amount
+   - A unique reference number for each transaction
+
+3. Click the "Upload CSV or Excel with credit card records" button
+
+4. Select your file from your computer
+
+5. The system will show you a preview of your file
+
+6. Map your columns:
+   - For each required field, select which column in your file contains that information
+   - Example: If your file has "Date", select it for "CC_Txn_Date"
+   - Example: If your file has "Description", select it for "CC_Description"
+   - Example: If your file has "Amount", select it for "CC_Amt"
+
+7. Click "Import CC Data" button
+
+8. You should see a success message and your data will appear in the table
+
+================================================================================
+STEP 3: RUN THE RECONCILIATION
+================================================================================
+
+1. Stay on the "CC Data" page
+
+2. Scroll down to find the "Manage Imports" section
+
+3. You will see a dropdown list showing your uploaded batches
+   - Each batch shows: Batch ID and number of transactions
+   - Example: "CCBATCH-20251117-103522-9004 (25 rows)"
+
+4. Select the batch you want to reconcile from the dropdown
+
+5. Click the "Run Reco" button (blue button)
+
+6. The system will automatically:
+   - Match your credit card transactions to vendors
+   - Find matching purchase orders
+   - Calculate totals and flags
+   - Create a reconciliation report
+
+7. You will be automatically taken to the "Reco" (Reconciliation) page
+
+================================================================================
+STEP 4: UNDERSTAND YOUR RESULTS
+================================================================================
+
+On the Reconciliation page, you will see several tabs at the top:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 1: RESULTS (Summary View)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This shows you a summary grouped by vendor and date.
+
+What you'll see:
+- Total Credit Card Amount: How much you spent on credit card
+- Total PO Amount: How much was in matching purchase orders
+- Flag:
+  * GREEN FLAG = Credit card amount is less than or equal to PO amount (Good!)
+  * RED FLAG = Credit card amount is more than PO amount (Needs review)
+
+What to do:
+- Look for RED FLAGS - these need your attention
+- You can filter by vendor, department, or flag type using the filters at the top
+- Adjust "Grace Days Buffer" if needed (default is 5 days)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 2: MAPPED (Successfully Matched)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These are transactions that were automatically matched to vendors.
+No action needed - these are complete!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 3: COMMON (Needs Your Decision)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These transactions matched a vendor but need you to choose the department.
+
+IMPORTANT:
+- Transactions under $100 are automatically assigned to FBM department
+- You only need to review transactions $100 and above
+
+What to do:
+1. Look at each transaction description
+2. For each one, select the Department:
+   - FBA = Fulfillment by Amazon
+   - FBM = Fulfillment by Merchant
+3. Check the "Apply" box for transactions you want to process
+4. Click "Apply Selected" button at the bottom
+
+The system will automatically:
+- Assign the vendor information
+- Update payment terms
+- Complete the reconciliation for those transactions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 4: UNMAPPED (Could Not Match)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These transactions could not be matched to any vendor.
+pyarrow.lib.ArrowTypeError: ("Expected bytes, got a 'bool' object", 'Conversion failed for column Vendor_Prefix with type object')
+Traceback:
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/streamlit/runtime/scriptrunner/exec_code.py", line 129, in exec_func_with_error_handling
+    result = func()
+             ^^^^^^
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 669, in code_to_exec
+    exec(code, module._dict_)  # noqa: S102
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/ubuntu/ergode-app/main.py", line 3780, in <module>
+    main()
+File "/home/ubuntu/ergode-app/main.py", line 3772, in main
+    render_po_data()
+File "/home/ubuntu/ergode-app/main.py", line 1076, in render_po_data
+    write_parquet(combined_df, po_path)
+File "/home/ubuntu/ergode-app/main.py", line 68, in write_parquet
+    df_to_write.to_parquet(parquet_path, engine="pyarrow", index=False)
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/pandas/util/_decorators.py", line 333, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/pandas/core/frame.py", line 3124, in to_parquet
+    return to_parquet(
+           ^^^^^^^^^^^
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/pandas/io/parquet.py", line 482, in to_parquet
+    impl.write(
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/pandas/io/parquet.py", line 191, in write
+    table = self.api.Table.from_pandas(df, **from_pandas_kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "pyarrow/table.pxi", line 4795, in pyarrow.lib.Table.from_pandas
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/pyarrow/pandas_compat.py", line 650, in dataframe_to_arrays
+    arrays[i] = maybe_fut.result()
+                ^^^^^^^^^^^^^^^^^^
+File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/pyarrow/pandas_compat.py", line 625, in convert_column
+    raise e
+File "/home/ubuntu/ergode-app/venv/lib/python3.12/site-packages/pyarrow/pandas_compat.py", line 619, in convert_column
+    result = pa.array(col, type=type_, from_pandas=True, safe=safe)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "pyarrow/array.pxi", line 365, in pyarrow.lib.array
+File "pyarrow/array.pxi", line 91, in pyarrow.lib._ndarray_to_array
+File "pyarrow/error.pxi", line 92, in pyarrow.lib.check_status
+What to do:
+- Contact your administrator to add these descriptions to the mapping system
+- Or, if you know the vendor, ask them to add it to the vendor master list
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 5: OTHERS (Not Available)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These are transactions marked as "Not Available" in the system.
+Usually no action needed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 6: ANALYSIS (Detailed Matching)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This shows detailed information about which purchase orders matched which
+credit card transactions. Use this if you need to see the exact matches.
+
+================================================================================
+STEP 5: DOWNLOAD YOUR RESULTS
+================================================================================
+
+1. On the Reconciliation page, you can download your results as a CSV file
+
+2. The reconciliation file is automatically saved in the system
+
+3. You can come back later and select the same reconciliation file from the
+   dropdown at the top of the Reconciliation page
+
+================================================================================
+COMMON QUESTIONS
+================================================================================
+
+Q: What does "Grace Days" mean?
+A: This is a buffer period (default 5 days) that allows the system to match
+   purchase orders that are close to the credit card transaction date. You can
+   adjust this in the Results tab if needed.
+
+Q: Why are some transactions automatically processed?
+A: Transactions under $100 are automatically assigned to FBM department to
+   save you time. You only need to review larger transactions.
+
+Q: What if a transaction shows as "Unmapped"?
+A: This means the system doesn't recognize the description. Contact your
+   administrator to add it to the mapping system.
+
+Q: What does "Red Flag" mean?
+A: Red Flag means your credit card amount is MORE than the matching purchase
+   order amount. This might indicate:
+   - A purchase order is missing
+   - The amounts don't match
+   - You need to investigate further
+
+Q: Can I undo a reconciliation?
+A: Yes! You can rollback a reconciliation by clicking the "Rollback" button on
+   the Reconciliation page.
+
+Q: What if I make a mistake?
+A: You can always rollback and re-run the reconciliation. Your original data
+   is never deleted.
+
+================================================================================
+QUICK TIPS
+================================================================================
+
+✓ Always check the Results tab first to see Red Flags
+✓ Process Common transactions by selecting FBA or FBM department
+✓ Transactions under $100 are handled automatically - no action needed
+✓ You can filter results by vendor, department, or flag type
+✓ Download your results as CSV for your records
+✓ Contact your administrator if you see many "Unmapped" transactions
+
+================================================================================
+NEED HELP?
+================================================================================
+
+If you encounter any issues:
+1. Check that your file formats are correct (CSV or Excel)
+2. Make sure your vendor codes match between PO and master data
+3. Verify your column mappings are correct
+4. Contact your system administrator for assistance
+
+================================================================================
+END OF GUIDE
+================================================================================
