@@ -1382,7 +1382,7 @@ def render_po_data() -> None:
         "Dept",
         "Import_Batch_ID",
         "CC_Fee",
-        "CC_Charge_Amount",
+        "Total_PO_Amount",  # PO_Amount including CC fee
     ]
     mapping_fields = ["PO_Date", "PO_Number", "Vendor_Prefix", "PO_Amount"]
 
@@ -1784,11 +1784,11 @@ def render_po_data() -> None:
                 aligned_df["_lookup_key"].map(cc_fee_lookup).fillna(0.0)
             )
 
-            # Calculate CC_Charge_Amount = PO_Amount * CC_Fee
+            # Calculate Total_PO_Amount = PO_Amount * (1 + CC_Fee)
             aligned_df["PO_Amount"] = pd.to_numeric(
                 aligned_df["PO_Amount"], errors="coerce"
             ).fillna(0.0)
-            aligned_df["CC_Charge_Amount"] = aligned_df["PO_Amount"] * (
+            aligned_df["Total_PO_Amount"] = aligned_df["PO_Amount"] * (
                 1 + aligned_df["CC_Fee"]
             )
 
@@ -1797,16 +1797,18 @@ def render_po_data() -> None:
         else:
             # CC fee column not found in master, set to 0
             aligned_df["CC_Fee"] = 0.0
-            aligned_df["CC_Charge_Amount"] = 0.0
+            aligned_df["Total_PO_Amount"] = aligned_df["PO_Amount"]
             st.warning(
                 "CC fee column not found in master data. CC_Fee and CC_Charge_Amount set to 0."
             )
     except Exception as exc:  # pylint: disable=broad-except
         # If master file can't be loaded, set CC fee to 0
         aligned_df["CC_Fee"] = 0.0
-        aligned_df["CC_Charge_Amount"] = 0.0
+        aligned_df["Total_PO_Amount"] = pd.to_numeric(
+            aligned_df["PO_Amount"], errors="coerce"
+        ).fillna(0.0)
         st.warning(
-            f"Unable to load master data for CC fee lookup: {exc}. CC_Fee and CC_Charge_Amount set to 0."
+            f"Unable to load master data for CC fee lookup: {exc}. CC_Fee set to 0, Total_PO_Amount = PO_Amount."
         )
 
     combined_df = pd.concat(
@@ -2424,8 +2426,11 @@ def render_reco() -> None:
             columns=results_group_cols
             + [
                 "Total_CC_Amount",
-                "Transaction_Count",
+                "CC_Transaction_Count",
                 "Total_PO_Amount",
+                "PO_Transaction_Count",
+                "CC_Fee",
+                "Total_CC_Charge",
                 "Flag",
                 "Vendor_Name",
             ]
@@ -2494,39 +2499,36 @@ def render_reco() -> None:
             po_df["PO_Amount"] = pd.to_numeric(
                 po_df["PO_Amount"], errors="coerce"
             ).fillna(0.0)
-            # Use CC_Charge_Amount for reconciliation (PO_Amount including CC fee)
-            # If CC_Charge_Amount doesn't exist or is 0, fall back to PO_Amount
-            if "CC_Charge_Amount" in po_df.columns:
-                po_df["CC_Charge_Amount"] = pd.to_numeric(
-                    po_df["CC_Charge_Amount"], errors="coerce"
+            # Use Total_PO_Amount for reconciliation (PO_Amount including CC fee)
+            # If Total_PO_Amount doesn't exist, fall back to PO_Amount
+            if "Total_PO_Amount" in po_df.columns:
+                po_df["Total_PO_Amount"] = pd.to_numeric(
+                    po_df["Total_PO_Amount"], errors="coerce"
                 ).fillna(0.0)
-                # Use CC_Charge_Amount if it's greater than 0, otherwise use PO_Amount
-                po_df["Comparison_Amount"] = po_df["CC_Charge_Amount"].where(
-                    po_df["CC_Charge_Amount"] > 0, po_df["PO_Amount"]
+                # Use Total_PO_Amount if it exists and is valid
+                po_df["Comparison_Amount"] = po_df["Total_PO_Amount"].where(
+                    po_df["Total_PO_Amount"].notna(), po_df["PO_Amount"]
                 )
             else:
-                # CC_Charge_Amount column doesn't exist, use PO_Amount
+                # Total_PO_Amount column doesn't exist, use PO_Amount
                 po_df["Comparison_Amount"] = po_df["PO_Amount"]
             po_df["PO_Date"] = pd.to_datetime(po_df["PO_Date"], errors="coerce")
-            # Deduplicate PO by PO_Number to avoid counting same PO multiple times
-            # Keep the first occurrence of each PO_Number
-            if "PO_Number" in po_df.columns:
-                po_df = po_df.drop_duplicates(subset=["PO_Number"], keep="first")
+            # Keep all PO rows including duplicates (multiple line items)
+            # Don't aggregate - count every line item separately
             po_summary = pd.DataFrame(
                 columns=results_group_cols + ["Comparison_Amount"]
             )
+            # Use ALL CC transactions (not just unique groups) to match against POs
+            # This ensures we capture all PO matching windows
             window_cols = results_base[
-                results_group_cols + ["Window_Start", "Window_End", "CC_Txn_Date_dt"]
+                results_group_cols
+                + ["Window_Start", "Window_End", "CC_Txn_Date_dt", "CC_Reference_ID"]
             ].copy()
             window_cols = window_cols.dropna(
                 subset=["CC_Txn_Date_dt", "Window_Start", "Window_End"]
             )
-            # Deduplicate by grouping columns to avoid counting PO amounts multiple times
-            # when there are multiple CC transactions for the same vendor/date/dept/payment terms
-            if not window_cols.empty:
-                window_cols = window_cols.drop_duplicates(
-                    subset=results_group_cols, keep="first"
-                )
+            # Keep all rows to allow POs to match against any CC transaction in the window
+            # Don't deduplicate here - let POs match to all applicable transactions
             if not window_cols.empty and not po_df.empty:
                 # Filter PO data by vendor prefix first to reduce merge size
                 unique_vendors = window_cols["Vendor_Prefix"].dropna().unique()
@@ -2577,36 +2579,53 @@ def render_reco() -> None:
                     )
                     if valid_mask.any():
                         po_merge_data = po_merge.loc[valid_mask].copy()
-                        # Deduplicate by PO_Number to ensure each PO is counted only once per group
-                        po_merge_data = po_merge_data.drop_duplicates(
-                            subset=results_group_cols + ["PO_Number"], keep="first"
-                        )
+                        # Keep all rows including duplicates to count all line items
                         po_summary = (
-                            po_merge_data.groupby(results_group_cols, dropna=False)[
-                                "Comparison_Amount"
-                            ]
-                            .sum()
+                            po_merge_data.groupby(results_group_cols, dropna=False)
+                            .agg(
+                                Comparison_Amount=("Comparison_Amount", "sum"),
+                                Base_PO_Amount=(
+                                    "PO_Amount",
+                                    "sum",
+                                ),  # Base PO amount without CC fee
+                                PO_Transaction_Count=(
+                                    "PO_Number",
+                                    "count",
+                                ),  # Count all rows
+                            )
                             .reset_index()
                         )
                     else:
                         po_summary = pd.DataFrame(
-                            columns=results_group_cols + ["Comparison_Amount"]
+                            columns=results_group_cols
+                            + [
+                                "Comparison_Amount",
+                                "Base_PO_Amount",
+                                "PO_Transaction_Count",
+                            ]
                         )
                         po_merge_data = pd.DataFrame()
                 else:
                     po_summary = pd.DataFrame(
-                        columns=results_group_cols + ["Comparison_Amount"]
+                        columns=results_group_cols
+                        + [
+                            "Comparison_Amount",
+                            "Base_PO_Amount",
+                            "PO_Transaction_Count",
+                        ]
                     )
                     po_merge_data = pd.DataFrame()
             else:
                 po_summary = pd.DataFrame(
-                    columns=results_group_cols + ["Comparison_Amount"]
+                    columns=results_group_cols
+                    + ["Comparison_Amount", "Base_PO_Amount", "PO_Transaction_Count"]
                 )
                 po_merge_data = pd.DataFrame()
         except Exception as exc:  # pylint: disable=broad-except
             st.warning(f"Unable to load PO summary: {exc}")
             po_summary = pd.DataFrame(
-                columns=results_group_cols + ["Comparison_Amount"]
+                columns=results_group_cols
+                + ["Comparison_Amount", "Base_PO_Amount", "PO_Transaction_Count"]
             )
             po_merge_data = pd.DataFrame()
 
@@ -2634,36 +2653,97 @@ def render_reco() -> None:
             po_summary,
             on=results_group_cols,
             how="left",
-        ).rename(columns={"Comparison_Amount": "Total_PO_Amount"})
+        ).rename(
+            columns={
+                "Comparison_Amount": "Total_PO_Amount",
+                "Base_PO_Amount": "Base_PO_Amount",
+                "Transaction_Count": "CC_Transaction_Count",
+            }
+        )
         results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
+        results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
+        results_df["PO_Transaction_Count"] = (
+            results_df["PO_Transaction_Count"].fillna(0).astype(int)
+        )
+        # Calculate Total_CC_Charge = Total_PO_Amount - Base_PO_Amount
+        results_df["Total_CC_Charge"] = (
+            results_df["Total_PO_Amount"] - results_df["Base_PO_Amount"]
+        )
         results_df["Flag"] = np.where(
             results_df["Total_CC_Amount"] > results_df["Total_PO_Amount"],
             "Red Flag",
             "Green Flag",
         )
 
-        # Add Vendor_Name from master using Vendor_Prefix
+        # Add Vendor_Name and CC_Fee from master using Vendor_Prefix and Dept
         master_path = Path("data/master")
         try:
             master_df = read_parquet_with_fallback(master_path)
-            if "PREFIX" in master_df.columns and "VENDOR_NAME" in master_df.columns:
+            if "PREFIX" in master_df.columns:
                 master_df["PREFIX"] = (
                     master_df["PREFIX"].astype(str).str.strip().str.upper()
                 )
-                master_df = master_df.dropna(subset=["PREFIX"]).drop_duplicates(
-                    subset=["PREFIX"]
+                master_df["DEPT"] = (
+                    master_df["DEPT"].astype(str).str.strip().str.upper()
                 )
-                prefix_to_vendor_name = dict(
-                    zip(master_df["PREFIX"], master_df["VENDOR_NAME"])
-                )
-                results_df["Vendor_Name"] = results_df["Vendor_Prefix"].map(
-                    prefix_to_vendor_name
-                )
-                results_df["Vendor_Name"] = results_df["Vendor_Name"].fillna("")
+
+                # Get Vendor_Name (using first match per PREFIX)
+                if "VENDOR_NAME" in master_df.columns:
+                    master_df_unique = master_df.drop_duplicates(
+                        subset=["PREFIX"], keep="first"
+                    )
+                    prefix_to_vendor_name = dict(
+                        zip(master_df_unique["PREFIX"], master_df_unique["VENDOR_NAME"])
+                    )
+                    results_df["Vendor_Name"] = results_df["Vendor_Prefix"].map(
+                        prefix_to_vendor_name
+                    )
+                    results_df["Vendor_Name"] = results_df["Vendor_Name"].fillna("")
+                else:
+                    results_df["Vendor_Name"] = ""
+
+                # Get CC_Fee (using PREFIX + DEPT combination)
+                cc_fee_column = None
+                for col in master_df.columns:
+                    if "cc" in col.lower() and "fee" in col.lower():
+                        cc_fee_column = col
+                        break
+
+                if cc_fee_column:
+                    # Create lookup: (PREFIX, DEPT) -> CC_Fee
+                    master_df["_lookup_key"] = (
+                        master_df["PREFIX"].astype(str)
+                        + "|"
+                        + master_df["DEPT"].astype(str)
+                    )
+                    cc_fee_lookup = dict(
+                        zip(
+                            master_df["_lookup_key"],
+                            pd.to_numeric(
+                                master_df[cc_fee_column], errors="coerce"
+                            ).fillna(0.0),
+                        )
+                    )
+                    # Create lookup key for results_df
+                    results_df["_lookup_key"] = (
+                        results_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
+                        + "|"
+                        + results_df["Dept"].astype(str).str.strip().str.upper()
+                    )
+                    results_df["CC_Fee"] = (
+                        results_df["_lookup_key"].map(cc_fee_lookup).fillna(0.0)
+                    )
+                    results_df = results_df.drop(
+                        columns=["_lookup_key"], errors="ignore"
+                    )
+                else:
+                    results_df["CC_Fee"] = 0.0
             else:
                 results_df["Vendor_Name"] = ""
+                results_df["CC_Fee"] = 0.0
         except Exception:  # pylint: disable=broad-except
             results_df["Vendor_Name"] = ""
+            results_df["CC_Fee"] = 0.0
 
     tab_labels = [
         f"Results ({len(results_df)})",
@@ -2737,7 +2817,7 @@ def render_reco() -> None:
             if flag_filter and flag_filter != "<All>":
                 results_df = results_df[results_df["Flag"].astype(str) == flag_filter]
             results_display = results_df.copy()
-            # Reorder columns to show Vendor_Name after Vendor_Prefix
+            # Reorder columns to show Vendor_Name after Vendor_Prefix, and organize transaction counts
             if "Vendor_Name" in results_display.columns:
                 cols = list(results_display.columns)
                 if "Vendor_Prefix" in cols and "Vendor_Name" in cols:
@@ -2747,6 +2827,8 @@ def render_reco() -> None:
                     cols.pop(name_idx)
                     cols.insert(prefix_idx + 1, "Vendor_Name")
                     results_display = results_display[cols]
+
+            # Format amounts as currency
             results_display["Total_CC_Amount"] = results_display["Total_CC_Amount"].map(
                 lambda x: f"${x:,.2f}"
             )
@@ -2754,6 +2836,19 @@ def render_reco() -> None:
                 results_display["Total_PO_Amount"] = results_display[
                     "Total_PO_Amount"
                 ].map(lambda x: f"${x:,.2f}")
+
+            # Format amounts as currency (Total_CC_Charge already calculated above)
+            if "Total_CC_Charge" in results_display.columns:
+                results_display["Total_CC_Charge"] = results_display[
+                    "Total_CC_Charge"
+                ].map(lambda x: f"${x:,.2f}")
+
+            # Format CC_Fee as actual value (not percentage)
+            if "CC_Fee" in results_display.columns:
+                results_display["CC_Fee"] = results_display["CC_Fee"].map(
+                    lambda x: f"{x:.4f}" if pd.notna(x) else "0.0000"
+                )
+
             st.dataframe(results_display, hide_index=True, use_container_width=True)
 
     with tab_mapped:
