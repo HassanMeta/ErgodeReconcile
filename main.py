@@ -1,9 +1,50 @@
 from datetime import datetime
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+
+def validate_date_format_mmddyyyy(
+    date_series: pd.Series, field_name: str
+) -> tuple[bool, list[int]]:
+    """
+    Validate that dates are in MM/DD/YYYY format.
+
+    Args:
+        date_series: Series of date values (can be strings, datetime, etc.)
+        field_name: Name of the field for error messages
+
+    Returns:
+        Tuple of (is_valid, list of invalid row indices)
+    """
+    invalid_rows = []
+
+    # Convert to string for pattern matching
+    date_str_series = date_series.astype(str)
+
+    # Pattern for MM/DD/YYYY: 1-2 digits / 1-2 digits / 4 digits
+    mmddyyyy_pattern = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
+
+    for idx, date_val in enumerate(date_str_series):
+        # Skip NaN/null values (they'll be handled separately)
+        if pd.isna(date_val) or date_val in ["nan", "None", "<NA>", "NaT", ""]:
+            continue
+
+        # Check if it matches MM/DD/YYYY pattern
+        if not mmddyyyy_pattern.match(str(date_val).strip()):
+            invalid_rows.append(idx)
+            continue
+
+        # Try to parse with MM/DD/YYYY format to ensure it's valid
+        try:
+            datetime.strptime(str(date_val).strip(), "%m/%d/%Y")
+        except ValueError:
+            invalid_rows.append(idx)
+
+    return len(invalid_rows) == 0, invalid_rows
 
 
 # Parquet helper functions for fast data storage
@@ -107,6 +148,130 @@ def write_parquet(df: pd.DataFrame, file_path: Path) -> None:
             csv_path.unlink()  # Remove old CSV file
         except Exception:
             pass  # Ignore errors when removing old CSV
+
+
+def load_dept_mappings() -> pd.DataFrame:
+    """Load saved Dept mappings for CC_Reference_IDs."""
+    mappings_path = Path("records/common_dept_mappings.parquet")
+    try:
+        return read_parquet_with_fallback(mappings_path)
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["CC_Reference_ID", "Dept"])
+    except Exception:  # pylint: disable=broad-except
+        return pd.DataFrame(columns=["CC_Reference_ID", "Dept"])
+
+
+def save_dept_mappings(ref_ids: list[str], dept: str) -> None:
+    """Save Dept mapping for multiple CC_Reference_IDs."""
+    if dept not in {"FBA", "FBM"} or not ref_ids:
+        return
+    mappings_path = Path("records/common_dept_mappings.parquet")
+    try:
+        existing_df = load_dept_mappings()
+
+        # Normalize reference IDs
+        ref_ids_normalized = [str(ref_id).strip() for ref_id in ref_ids]
+
+        # Remove existing mappings for these reference IDs
+        if not existing_df.empty and "CC_Reference_ID" in existing_df.columns:
+            existing_df["CC_Reference_ID"] = (
+                existing_df["CC_Reference_ID"].astype(str).str.strip()
+            )
+            existing_df = existing_df[
+                ~existing_df["CC_Reference_ID"].isin(ref_ids_normalized)
+            ]
+
+        # Add new mappings
+        new_rows = [
+            {"CC_Reference_ID": ref_id, "Dept": dept.upper()}
+            for ref_id in ref_ids_normalized
+        ]
+        if new_rows:
+            new_df = pd.DataFrame(new_rows)
+            updated_df = pd.concat([existing_df, new_df], ignore_index=True)
+            write_parquet(updated_df, mappings_path)
+    except Exception:  # pylint: disable=broad-except
+        pass  # Silently fail if can't save
+
+
+def get_dept_mappings_for_common(common_df: pd.DataFrame) -> dict[str, str]:
+    """
+    Get saved Dept mappings for CC_Reference_IDs in common_df.
+    Only considers CC_Reference_IDs that exist in the current common_df (batch-specific).
+    Returns dict mapping normalized description to Dept (if all ref_ids in group agree).
+    """
+    if common_df.empty or "CC_Reference_ID" not in common_df.columns:
+        return {}
+
+    # Get all CC_Reference_IDs in current common_df (these are batch-specific)
+    current_ref_ids = set(
+        common_df["CC_Reference_ID"].dropna().astype(str).str.strip().tolist()
+    )
+
+    if not current_ref_ids:
+        return {}
+
+    saved_mappings_df = load_dept_mappings()
+    if saved_mappings_df.empty:
+        return {}
+
+    # Filter to only mappings for CC_Reference_IDs in current common_df
+    if "CC_Reference_ID" in saved_mappings_df.columns:
+        saved_mappings_df["CC_Reference_ID"] = (
+            saved_mappings_df["CC_Reference_ID"].astype(str).str.strip()
+        )
+        saved_mappings_df = saved_mappings_df[
+            saved_mappings_df["CC_Reference_ID"].isin(current_ref_ids)
+        ]
+    else:
+        return {}
+
+    if saved_mappings_df.empty:
+        return {}
+
+    # Create mapping: CC_Reference_ID -> Dept
+    ref_id_to_dept = dict(
+        zip(
+            saved_mappings_df["CC_Reference_ID"],
+            saved_mappings_df["Dept"].astype(str).str.strip().str.upper(),
+        )
+    )
+
+    # Get description column
+    desc_column = next(
+        (col for col in ("CC_Description", "Description") if col in common_df.columns),
+        None,
+    )
+    if not desc_column:
+        return {}
+
+    # Group by normalized description and check if all CC_Reference_IDs have same Dept
+    common_df_copy = common_df.copy()
+    common_df_copy["_norm_desc"] = (
+        common_df_copy[desc_column].astype(str).str.strip().str.upper()
+    )
+    common_df_copy["_ref_id"] = (
+        common_df_copy["CC_Reference_ID"].astype(str).str.strip()
+    )
+    common_df_copy["_saved_dept"] = common_df_copy["_ref_id"].map(ref_id_to_dept)
+
+    # For each description group, check if all have the same saved Dept
+    desc_to_dept = {}
+    for desc_norm, group in common_df_copy.groupby("_norm_desc"):
+        saved_depts = group["_saved_dept"].dropna().unique()
+        # If all reference IDs in this group have the same saved Dept, use it
+        if len(saved_depts) == 1 and saved_depts[0] in {"FBA", "FBM"}:
+            desc_to_dept[desc_norm] = saved_depts[0]
+        # If most have the same Dept, use that (for cases where some weren't saved yet)
+        elif len(saved_depts) > 0:
+            dept_counts = group["_saved_dept"].value_counts()
+            most_common = dept_counts.index[0] if not dept_counts.empty else None
+            if most_common and most_common in {"FBA", "FBM"}:
+                # Only use if majority (>= 50%) have this dept
+                if dept_counts.iloc[0] / len(group) >= 0.5:
+                    desc_to_dept[desc_norm] = most_common
+
+    return desc_to_dept
 
 
 # Custom CSS for modern dark theme UI
@@ -469,11 +634,20 @@ def render_masters() -> None:
     )
     st.markdown("*Manage vendor master data and description mappings*")
 
-    tab1, tab2 = st.tabs(["Vendor Master", "Description Mapping"])
+    tab1, tab2, tab3 = st.tabs(
+        ["Vendor Master", "Description Mapping", "CC Reference ID Mappings"]
+    )
 
     master_path = Path("data/master")
     mapping_path = Path("data/mappings")
-    master_columns = ["PREFIX", "VENDOR_NAME", "CATEGORY", "DEPT", "PAYMENT TERMS"]
+    master_columns = [
+        "PREFIX",
+        "VENDOR_NAME",
+        "CATEGORY",
+        "DEPT",
+        "PAYMENT TERMS",
+        "CC FEE",
+    ]
     category_options = ["ONLY FBA", "ONLY FBM", "COMMON", "NOT AVBL"]
     dept_options = ["FBA", "FBM"]
     payment_term_options = ["pre_payment", "Net 10", "Net 15", "Net 30"]
@@ -801,6 +975,384 @@ def render_masters() -> None:
             st.error(f"Unable to read vendor mapping file: {exc}")
         st.dataframe(mapping_df, hide_index=True, use_container_width=True)
 
+    with tab3:
+        st.markdown("### CC Reference ID to Dept Mappings")
+        st.caption(
+            "View and manage Dept (FBA/FBM) mappings for CC Reference IDs. "
+            "These mappings are created when you select FBA or FBM in the Common tab."
+        )
+        try:
+            dept_mappings_df = load_dept_mappings()
+            if dept_mappings_df.empty:
+                st.info(
+                    "No CC Reference ID mappings found. Mappings will appear here after you select FBA/FBM in the Common tab."
+                )
+            else:
+                # Display summary statistics
+                total_mappings = len(dept_mappings_df)
+                fba_count = len(dept_mappings_df[dept_mappings_df["Dept"] == "FBA"])
+                fbm_count = len(dept_mappings_df[dept_mappings_df["Dept"] == "FBM"])
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Mappings", total_mappings)
+                with col2:
+                    st.metric("FBA Mappings", fba_count)
+                with col3:
+                    st.metric("FBM Mappings", fbm_count)
+
+                st.markdown("---")
+
+                # Add filters
+                filter_col1, filter_col2 = st.columns(2)
+                with filter_col1:
+                    dept_filter = st.selectbox(
+                        "Filter by Dept",
+                        options=["<All>", "FBA", "FBM"],
+                        key="dept_mapping_filter",
+                    )
+                with filter_col2:
+                    search_ref_id = st.text_input(
+                        "Search CC Reference ID",
+                        key="search_ref_id",
+                        placeholder="Enter CC Reference ID to search...",
+                    )
+
+                # Apply filters
+                filtered_df = dept_mappings_df.copy()
+                if dept_filter != "<All>":
+                    filtered_df = filtered_df[filtered_df["Dept"] == dept_filter]
+                if search_ref_id:
+                    search_term = str(search_ref_id).strip().upper()
+                    filtered_df = filtered_df[
+                        filtered_df["CC_Reference_ID"]
+                        .astype(str)
+                        .str.upper()
+                        .str.contains(search_term, na=False)
+                    ]
+
+                if filtered_df.empty:
+                    st.info("No mappings match the current filters.")
+                else:
+                    st.markdown(
+                        f"**Showing {len(filtered_df)} of {total_mappings} mappings**"
+                    )
+
+                    # Add a checkbox column for deletion selection
+                    display_df = filtered_df.copy()
+                    display_df["Delete"] = False
+
+                    # Use data editor for editing and deletion
+                    with st.form("edit_dept_mappings_form", clear_on_submit=False):
+                        edited_df = st.data_editor(
+                            display_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_config={
+                                "CC_Reference_ID": st.column_config.TextColumn(
+                                    "CC Reference ID",
+                                    help="Unique identifier for the credit card transaction",
+                                    disabled=True,
+                                ),
+                                "Dept": st.column_config.SelectboxColumn(
+                                    "Department",
+                                    options=["FBA", "FBM"],
+                                    help="Department assignment (FBA or FBM)",
+                                    required=True,
+                                ),
+                                "Delete": st.column_config.CheckboxColumn(
+                                    "Delete",
+                                    help="Check to mark this mapping for deletion",
+                                    default=False,
+                                ),
+                            },
+                            key="dept_mappings_editor",
+                        )
+
+                        col1, col2, col3 = st.columns([1, 1, 2])
+                        with col1:
+                            save_changes = st.form_submit_button(
+                                "Save Changes", type="primary", use_container_width=True
+                            )
+                        with col2:
+                            delete_selected = st.form_submit_button(
+                                "Delete Selected", use_container_width=True
+                            )
+                        with col3:
+                            export_csv = st.form_submit_button(
+                                "Export to CSV", use_container_width=True
+                            )
+
+                    # Handle save changes
+                    if save_changes:
+                        try:
+                            # Get rows that were modified (Dept changed)
+                            edited_df["Dept"] = (
+                                edited_df["Dept"]
+                                .fillna("")
+                                .astype(str)
+                                .str.strip()
+                                .str.upper()
+                            )
+
+                            # Update mappings for changed rows
+                            changes_made = False
+                            for _, row in edited_df.iterrows():
+                                ref_id = str(row["CC_Reference_ID"]).strip()
+                                new_dept = row["Dept"]
+
+                                if new_dept in {"FBA", "FBM"}:
+                                    # Check if this is a change
+                                    original_row = filtered_df[
+                                        filtered_df["CC_Reference_ID"]
+                                        .astype(str)
+                                        .str.strip()
+                                        == ref_id
+                                    ]
+                                    if not original_row.empty:
+                                        original_dept = (
+                                            str(original_row.iloc[0]["Dept"])
+                                            .strip()
+                                            .upper()
+                                        )
+                                        if new_dept != original_dept:
+                                            # Update the mapping
+                                            save_dept_mappings([ref_id], new_dept)
+                                            changes_made = True
+
+                            if changes_made:
+                                st.success("Changes saved successfully!")
+                                if hasattr(st, "rerun"):
+                                    st.rerun()
+                                else:  # pragma: no cover
+                                    st.experimental_rerun()
+                            else:
+                                st.info("No changes detected.")
+                        except Exception as exc:  # pylint: disable=broad-except
+                            st.error(f"Error saving changes: {exc}")
+
+                    # Handle delete selected
+                    if delete_selected:
+                        try:
+                            rows_to_delete = edited_df[edited_df["Delete"]]
+                            if rows_to_delete.empty:
+                                st.warning("No rows selected for deletion.")
+                            else:
+                                # Get all current mappings
+                                all_mappings_df = load_dept_mappings()
+
+                                # Get reference IDs to delete
+                                ref_ids_to_delete = set(
+                                    rows_to_delete["CC_Reference_ID"]
+                                    .astype(str)
+                                    .str.strip()
+                                    .tolist()
+                                )
+
+                                # Remove deleted mappings
+                                if not all_mappings_df.empty:
+                                    all_mappings_df["CC_Reference_ID"] = (
+                                        all_mappings_df["CC_Reference_ID"]
+                                        .astype(str)
+                                        .str.strip()
+                                    )
+                                    updated_mappings_df = all_mappings_df[
+                                        ~all_mappings_df["CC_Reference_ID"].isin(
+                                            ref_ids_to_delete
+                                        )
+                                    ]
+
+                                    # Save updated mappings
+                                    mappings_path = Path(
+                                        "records/common_dept_mappings.parquet"
+                                    )
+                                    write_parquet(updated_mappings_df, mappings_path)
+
+                                    st.success(
+                                        f"Successfully deleted {len(ref_ids_to_delete)} mapping(s)."
+                                    )
+                                    if hasattr(st, "rerun"):
+                                        st.rerun()
+                                    else:  # pragma: no cover
+                                        st.experimental_rerun()
+                        except Exception as exc:  # pylint: disable=broad-except
+                            st.error(f"Error deleting mappings: {exc}")
+
+                    # Handle export
+                    if export_csv:
+                        csv = filtered_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download CSV",
+                            data=csv,
+                            file_name=f"cc_reference_id_mappings_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            key="download_dept_mappings",
+                        )
+        except FileNotFoundError:
+            st.info(
+                "No CC Reference ID mappings found. Mappings will appear here after you select FBA/FBM in the Common tab."
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            st.error(f"Unable to load CC Reference ID mappings: {exc}")
+
+
+def run_reconciliation(batch_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Run reconciliation on a batch of CC transactions.
+    Returns the reconciled dataframe without saving to file.
+
+    Args:
+        batch_df: DataFrame with CC transactions from a batch
+
+    Returns:
+        DataFrame with reconciliation results
+    """
+    try:
+        mappings_df = read_parquet_with_fallback(Path("data/mappings"))
+        master_df = read_parquet_with_fallback(Path("data/master"))
+    except Exception as exc:  # pylint: disable=broad-except
+        raise Exception(f"Unable to load mapping data: {exc}") from exc
+
+    mappings_df["DESCRIPTION"] = (
+        mappings_df["DESCRIPTION"]
+        .astype(str)
+        .str.replace(r"\s+", " ", regex=True)  # Normalize multiple spaces
+        .str.strip()
+    )
+    mappings_df["_norm_description"] = mappings_df["DESCRIPTION"].str.upper()
+
+    batch_df["_norm_description"] = (
+        batch_df["CC_Description"]
+        .astype(str)
+        .str.replace(r"\s+", " ", regex=True)  # Normalize multiple spaces
+        .str.strip()
+        .str.upper()
+    )
+
+    reco_df = batch_df.merge(
+        mappings_df[["PREFIX", "_norm_description"]],
+        on="_norm_description",
+        how="left",
+    )
+
+    master_trim = (
+        master_df.dropna(subset=["PREFIX"])
+        .drop_duplicates(subset=["PREFIX"])
+        .set_index("PREFIX")
+    )
+    prefix_category_map = (
+        master_trim["CATEGORY"].to_dict() if "CATEGORY" in master_trim.columns else {}
+    )
+    prefix_dept_map = (
+        master_trim["DEPT"].to_dict() if "DEPT" in master_trim.columns else {}
+    )
+    prefix_terms_map = {}
+    if "PAYMENT TERMS" in master_trim.columns:
+        # Convert to numeric before creating dict to ensure proper type
+        terms_series = pd.to_numeric(
+            master_trim["PAYMENT TERMS"], errors="coerce"
+        ).fillna(0)
+        prefix_terms_map = terms_series.to_dict()
+    prefix_vendor_name_map = (
+        master_trim["VENDOR_NAME"].to_dict()
+        if "VENDOR_NAME" in master_trim.columns
+        else {}
+    )
+
+    reco_df["Vendor_Prefix"] = reco_df["PREFIX"].fillna("")
+    reco_df["Vendor_Name"] = reco_df["Vendor_Prefix"].map(prefix_vendor_name_map)
+    reco_df["Category"] = reco_df["Vendor_Prefix"].map(prefix_category_map)
+    reco_df.loc[reco_df["Vendor_Prefix"] == "", "Category"] = "Unmapped"
+    reco_df["Category"] = reco_df["Category"].fillna("Unmapped")
+
+    reco_df["Dept"] = reco_df["Vendor_Prefix"].map(prefix_dept_map)
+    reco_df["Payment_Terms"] = (
+        reco_df["Vendor_Prefix"]
+        .map(prefix_terms_map)
+        .apply(lambda x: pd.to_numeric(x, errors="coerce") if pd.notna(x) else 0)
+    )
+    reco_df.loc[
+        reco_df["Vendor_Prefix"] == "",
+        ["Dept", "Payment_Terms", "Vendor_Name"],
+    ] = pd.NA
+
+    # Check for saved Dept mappings and update Category from COMMON to ONLY FBA/FBM
+    if "CC_Reference_ID" in reco_df.columns:
+        try:
+            saved_mappings_df = load_dept_mappings()
+            if (
+                not saved_mappings_df.empty
+                and "CC_Reference_ID" in saved_mappings_df.columns
+            ):
+                # Create mapping: CC_Reference_ID -> Dept
+                saved_mappings_df["CC_Reference_ID"] = (
+                    saved_mappings_df["CC_Reference_ID"].astype(str).str.strip()
+                )
+                ref_id_to_dept = dict(
+                    zip(
+                        saved_mappings_df["CC_Reference_ID"],
+                        saved_mappings_df["Dept"].astype(str).str.strip().str.upper(),
+                    )
+                )
+
+                # Update Category for transactions with saved Dept mappings
+                reco_df["CC_Reference_ID"] = (
+                    reco_df["CC_Reference_ID"].astype(str).str.strip()
+                )
+                saved_dept_mask = reco_df["CC_Reference_ID"].isin(ref_id_to_dept.keys())
+
+                # Only update if current category is COMMON
+                common_mask = reco_df["Category"].astype(str).str.upper() == "COMMON"
+                update_mask = saved_dept_mask & common_mask
+
+                if update_mask.any():
+                    # Map saved Dept to Category
+                    saved_depts = reco_df.loc[update_mask, "CC_Reference_ID"].map(
+                        ref_id_to_dept
+                    )
+                    reco_df.loc[update_mask, "Category"] = saved_depts.apply(
+                        lambda dept: "ONLY FBA" if dept == "FBA" else "ONLY FBM"
+                    )
+                    # Also update Dept column with saved mapping
+                    reco_df.loc[update_mask, "Dept"] = saved_depts
+
+                    # Update Payment_Terms based on saved Dept and Vendor_Prefix
+                    for idx in reco_df.loc[update_mask].index:
+                        vendor_prefix = reco_df.loc[idx, "Vendor_Prefix"]
+                        saved_dept = saved_depts.loc[idx]
+                        if vendor_prefix and pd.notna(vendor_prefix):
+                            # Look up Payment_Terms from master for this vendor and dept
+                            matched_rows = master_df[
+                                (
+                                    master_df.get("PREFIX", "").astype(str).str.strip()
+                                    == str(vendor_prefix).strip()
+                                )
+                                & (
+                                    master_df.get("DEPT", "")
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
+                                    == saved_dept
+                                )
+                            ]
+                            if not matched_rows.empty:
+                                payment_terms = matched_rows.iloc[0].get(
+                                    "PAYMENT TERMS", pd.NA
+                                )
+                                if pd.notna(payment_terms):
+                                    payment_terms_numeric = pd.to_numeric(
+                                        payment_terms, errors="coerce"
+                                    )
+                                    if pd.notna(payment_terms_numeric):
+                                        reco_df.loc[idx, "Payment_Terms"] = (
+                                            payment_terms_numeric
+                                        )
+        except Exception:  # pylint: disable=broad-except
+            # Silently fail if can't load mappings - reconciliation should still work
+            pass
+
+    return reco_df
+
 
 def render_po_data() -> None:
     st.markdown(
@@ -829,6 +1381,8 @@ def render_po_data() -> None:
         "PO_Amount",
         "Dept",
         "Import_Batch_ID",
+        "CC_Fee",
+        "CC_Charge_Amount",
     ]
     mapping_fields = ["PO_Date", "PO_Number", "Vendor_Prefix", "PO_Amount"]
 
@@ -966,33 +1520,42 @@ def render_po_data() -> None:
 
             if not batch_options:
                 st.caption("No batch information available to manage.")
+                selected_batches = []
             else:
-                selection = st.selectbox(
-                    "Select Import Batch to Roll Back",
-                    options=["Select a batch"] + batch_options,
-                    index=0,
-                    key="rollback_batch",
+                selected_display = st.multiselect(
+                    "Select Import Batches to Roll Back",
+                    options=batch_options,
+                    default=st.session_state.get("po_selected_batches", []),
+                    key="po_rollback_batches",
                 )
 
-                if selection != "Select a batch":
-                    selected_batch = selection.split(" (", maxsplit=1)[0]
-                else:
-                    selected_batch = None
+                # Update session state
+                st.session_state["po_selected_batches"] = selected_display
+
+                # Extract batch IDs from selected display strings
+                selected_batches = [
+                    display.split(" (", maxsplit=1)[0] for display in selected_display
+                ]
 
                 rollback_clicked = st.button(
-                    "Rollback Selected Batch",
-                    disabled=selected_batch is None,
+                    "Rollback Selected Batches",
+                    disabled=len(selected_batches) == 0,
                     type="primary",
                 )
 
-                if rollback_clicked and selected_batch:
+                if rollback_clicked and selected_batches:
+                    # Filter out all selected batches
                     updated_df = existing_df[
-                        existing_df["Import_Batch_ID"].astype(str) != selected_batch
+                        ~existing_df["Import_Batch_ID"]
+                        .astype(str)
+                        .isin(selected_batches)
                     ]
                     write_parquet(updated_df, po_path)
+                    batch_list = ", ".join(selected_batches)
                     st.session_state["po_upload_success"] = (
-                        f"Rolled back batch {selected_batch}"
+                        f"Rolled back {len(selected_batches)} batch(es): {batch_list}"
                     )
+                    st.session_state["po_selected_batches"] = []
                     if hasattr(st, "rerun"):
                         st.rerun()
                     else:  # pragma: no cover
@@ -1010,6 +1573,10 @@ def render_po_data() -> None:
         st.dataframe(filtered_df, hide_index=True, use_container_width=True)
 
     # Use dynamic key based on upload counter to force reset after upload
+    st.warning(
+        "Please use CSV format and the **PO Date** should be in the format MM/DD/YYYY and **PO Amount** should be a number.",
+        icon="⚠️",
+    )
     upload_counter = st.session_state.get("po_upload_counter", 0)
     uploaded_file = st.file_uploader(
         "Upload CSV with PO records",
@@ -1045,7 +1612,7 @@ def render_po_data() -> None:
         return
 
     st.subheader("Uploaded File Preview")
-    st.dataframe(incoming_df.head(), hide_index=True, use_container_width=True)
+    st.caption(f"{len(incoming_df)} records found")
 
     st.markdown("### Map uploaded columns to required fields")
     st.caption(
@@ -1118,9 +1685,129 @@ def render_po_data() -> None:
             aligned_df["PO_Date"].replace("nan", "").replace("None", "")
         )
 
+    # Validate PO_Date format (MM/DD/YYYY)
+    if "PO_Date" in aligned_df.columns:
+        is_valid, invalid_rows = validate_date_format_mmddyyyy(
+            aligned_df["PO_Date"], "PO_Date"
+        )
+        if not is_valid:
+            invalid_dates = aligned_df.loc[invalid_rows, "PO_Date"].tolist()
+            invalid_dates_str = ", ".join([str(d) for d in invalid_dates[:10]])
+            suffix = "..." if len(invalid_dates) > 10 else ""
+            st.error(
+                f"PO_Date must be in MM/DD/YYYY format. Invalid dates found: {invalid_dates_str}{suffix}"
+            )
+            return
+
+        # Convert PO_Date to datetime with explicit format, then back to string in YYYY-MM-DD format
+        aligned_df["PO_Date"] = pd.to_datetime(
+            aligned_df["PO_Date"], format="%m/%d/%Y", errors="coerce"
+        )
+        if aligned_df["PO_Date"].isna().any():
+            st.error(
+                "Unable to parse PO_Date for all rows. Please ensure dates are in MM/DD/YYYY format."
+            )
+            return
+        # Store as string in YYYY-MM-DD format for consistency
+        aligned_df["PO_Date"] = aligned_df["PO_Date"].dt.strftime("%Y-%m-%d")
+
+    # Validate PO_Number uniqueness - check against existing data
+    if "PO_Number" in aligned_df.columns:
+        existing_po_numbers = (
+            existing_df["PO_Number"].dropna().astype(str).str.strip().tolist()
+            if not existing_df.empty and "PO_Number" in existing_df.columns
+            else []
+        )
+        incoming_po_numbers = (
+            aligned_df["PO_Number"].dropna().astype(str).str.strip().tolist()
+        )
+        duplicate_po_numbers = sorted(
+            set(incoming_po_numbers).intersection(existing_po_numbers)
+        )
+        if duplicate_po_numbers:
+            preview = ", ".join(duplicate_po_numbers[:10])
+            suffix = "..." if len(duplicate_po_numbers) > 10 else ""
+            st.error(
+                "Import aborted. The following PO_Number values already exist: "
+                + preview
+                + suffix
+            )
+            return
+
     aligned_df["Dept"] = dept_value
     batch_id = datetime.utcnow().strftime("BATCH-%Y%m%d-%H%M%S")
     aligned_df["Import_Batch_ID"] = batch_id
+
+    # Load master data to get CC fee
+    try:
+        master_df = read_parquet_with_fallback(Path("data/master"))
+        # Normalize Vendor_Prefix for matching
+        master_df["PREFIX"] = master_df["PREFIX"].astype(str).str.strip().str.upper()
+        master_df["DEPT"] = master_df["DEPT"].astype(str).str.strip().str.upper()
+
+        # Check if CC fee column exists (could be "CC fee", "CC_Fee", "cc fee", etc.)
+        cc_fee_column = None
+        for col in master_df.columns:
+            if "cc" in col.lower() and "fee" in col.lower():
+                cc_fee_column = col
+                break
+
+        if cc_fee_column:
+            # Create lookup dictionary: (Vendor_Prefix, Dept) -> CC_Fee
+            master_df["_lookup_key"] = (
+                master_df["PREFIX"].astype(str) + "|" + master_df["DEPT"].astype(str)
+            )
+            cc_fee_lookup = dict(
+                zip(
+                    master_df["_lookup_key"],
+                    pd.to_numeric(master_df[cc_fee_column], errors="coerce").fillna(
+                        0.0
+                    ),
+                )
+            )
+
+            # Normalize aligned_df Vendor_Prefix and Dept for matching
+            aligned_df["Vendor_Prefix"] = (
+                aligned_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
+            )
+            aligned_df["Dept"] = aligned_df["Dept"].astype(str).str.strip().str.upper()
+
+            # Create lookup key for aligned_df
+            aligned_df["_lookup_key"] = (
+                aligned_df["Vendor_Prefix"].astype(str)
+                + "|"
+                + aligned_df["Dept"].astype(str)
+            )
+
+            # Get CC_Fee from master
+            aligned_df["CC_Fee"] = (
+                aligned_df["_lookup_key"].map(cc_fee_lookup).fillna(0.0)
+            )
+
+            # Calculate CC_Charge_Amount = PO_Amount * CC_Fee
+            aligned_df["PO_Amount"] = pd.to_numeric(
+                aligned_df["PO_Amount"], errors="coerce"
+            ).fillna(0.0)
+            aligned_df["CC_Charge_Amount"] = aligned_df["PO_Amount"] * (
+                1 + aligned_df["CC_Fee"]
+            )
+
+            # Remove temporary lookup key
+            aligned_df = aligned_df.drop(columns=["_lookup_key"], errors="ignore")
+        else:
+            # CC fee column not found in master, set to 0
+            aligned_df["CC_Fee"] = 0.0
+            aligned_df["CC_Charge_Amount"] = 0.0
+            st.warning(
+                "CC fee column not found in master data. CC_Fee and CC_Charge_Amount set to 0."
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        # If master file can't be loaded, set CC fee to 0
+        aligned_df["CC_Fee"] = 0.0
+        aligned_df["CC_Charge_Amount"] = 0.0
+        st.warning(
+            f"Unable to load master data for CC fee lookup: {exc}. CC_Fee and CC_Charge_Amount set to 0."
+        )
 
     combined_df = pd.concat(
         [existing_df, aligned_df],
@@ -1296,253 +1983,57 @@ def render_cc_data() -> None:
 
             if not batch_options:
                 st.caption("No batch information available to manage.")
-                selected_batch = None
-                existing_reco_id = None
+                selected_batches = []
             else:
-                selection = st.selectbox(
-                    "Select Import Batch",
-                    options=["Select a batch"] + batch_options,
-                    index=0,
-                    key="cc_manage_batch",
+                selected_display = st.multiselect(
+                    "Select Import Batches to Roll Back",
+                    options=batch_options,
+                    default=st.session_state.get("cc_selected_batches", []),
+                    key="cc_rollback_batches",
                 )
 
-                if selection != "Select a batch":
-                    selected_batch = selection.split(" (", maxsplit=1)[0]
-                    batch_mask = (
-                        existing_df["Import_Batch_ID"].astype(str) == selected_batch
-                    )
-                    reco_ids = (
-                        existing_df.loc[batch_mask, "Reco_ID"]
-                        .dropna()
-                        .astype(str)
-                        .unique()
-                        .tolist()
-                    )
-                    existing_reco_id = reco_ids[0] if reco_ids else None
-                else:
-                    selected_batch = None
-                    existing_reco_id = None
+                # Update session state
+                st.session_state["cc_selected_batches"] = selected_display
 
-            col_rollback, col_reco = st.columns([1, 1], gap="small")
-            with col_rollback:
-                rollback_clicked = st.button(
-                    "Rollback Selected Batch",
-                    disabled=selected_batch is None,
-                    type="secondary",
-                    key="cc_rollback_button",
-                    use_container_width=True,
-                )
-            with col_reco:
-                run_reco_clicked = st.button(
-                    "Show Reco" if existing_reco_id else "Run Reco",
-                    disabled=selected_batch is None,
-                    type="primary",
-                    key="cc_run_reco_button",
-                    use_container_width=True,
-                )
+                # Extract batch IDs from selected display strings
+                selected_batches = [
+                    display.split(" (", maxsplit=1)[0] for display in selected_display
+                ]
 
-            if rollback_clicked and selected_batch:
+            rollback_clicked = st.button(
+                "Rollback Selected Batches",
+                disabled=len(selected_batches) == 0,
+                type="secondary",
+                key="cc_rollback_button",
+                use_container_width=True,
+            )
+
+            if rollback_clicked and selected_batches:
+                # Filter out all selected batches
                 updated_df = existing_df[
-                    existing_df["Import_Batch_ID"].astype(str) != selected_batch
+                    ~existing_df["Import_Batch_ID"].astype(str).isin(selected_batches)
                 ]
                 write_parquet(updated_df, cc_path)
+                batch_list = ", ".join(selected_batches)
                 st.session_state["cc_upload_success"] = (
-                    f"Rolled back batch {selected_batch}"
+                    f"Rolled back {len(selected_batches)} batch(es): {batch_list}"
                 )
+                st.session_state["cc_selected_batches"] = []
                 if hasattr(st, "rerun"):
                     st.rerun()
                 else:  # pragma: no cover
                     st.experimental_rerun()
 
-            if run_reco_clicked and selected_batch:
-                if existing_reco_id:
-                    st.session_state["selected_reco_id"] = existing_reco_id
-                    st.session_state["pending_active_page"] = "Reco"
-                    if hasattr(st, "rerun"):
-                        st.rerun()
-                    else:  # pragma: no cover
-                        st.experimental_rerun()
-                    return
-
-                reco_dir = Path("records/reco")
-                reco_dir.mkdir(parents=True, exist_ok=True)
-
-                batch_df = existing_df[
-                    existing_df["Import_Batch_ID"].astype(str) == selected_batch
-                ].copy()
-
-                if batch_df.empty:
-                    st.error("No transactions found for the selected batch.")
-                else:
-                    try:
-                        mappings_df = read_parquet_with_fallback(Path("data/mappings"))
-                        master_df = read_parquet_with_fallback(Path("data/master"))
-                    except Exception as exc:  # pylint: disable=broad-except
-                        st.error(f"Unable to load mapping data: {exc}")
-                    else:
-                        mappings_df["DESCRIPTION"] = (
-                            mappings_df["DESCRIPTION"]
-                            .astype(str)
-                            .str.replace(
-                                r"\s+", " ", regex=True
-                            )  # Normalize multiple spaces
-                            .str.strip()
-                        )
-                        mappings_df["_norm_description"] = mappings_df[
-                            "DESCRIPTION"
-                        ].str.upper()
-
-                        batch_df["_norm_description"] = (
-                            batch_df["CC_Description"]
-                            .astype(str)
-                            .str.replace(
-                                r"\s+", " ", regex=True
-                            )  # Normalize multiple spaces
-                            .str.strip()
-                            .str.upper()
-                        )
-
-                        reco_df = batch_df.merge(
-                            mappings_df[["PREFIX", "_norm_description"]],
-                            on="_norm_description",
-                            how="left",
-                        )
-
-                        master_trim = (
-                            master_df.dropna(subset=["PREFIX"])
-                            .drop_duplicates(subset=["PREFIX"])
-                            .set_index("PREFIX")
-                        )
-                        prefix_category_map = (
-                            master_trim["CATEGORY"].to_dict()
-                            if "CATEGORY" in master_trim.columns
-                            else {}
-                        )
-                        prefix_dept_map = (
-                            master_trim["DEPT"].to_dict()
-                            if "DEPT" in master_trim.columns
-                            else {}
-                        )
-                        prefix_terms_map = {}
-                        if "PAYMENT TERMS" in master_trim.columns:
-                            # Convert to numeric before creating dict to ensure proper type
-                            terms_series = pd.to_numeric(
-                                master_trim["PAYMENT TERMS"], errors="coerce"
-                            ).fillna(0)
-                            prefix_terms_map = terms_series.to_dict()
-                        prefix_vendor_name_map = (
-                            master_trim["VENDOR_NAME"].to_dict()
-                            if "VENDOR_NAME" in master_trim.columns
-                            else {}
-                        )
-
-                        reco_df["Vendor_Prefix"] = reco_df["PREFIX"].fillna("")
-                        reco_df["Vendor_Name"] = reco_df["Vendor_Prefix"].map(
-                            prefix_vendor_name_map
-                        )
-                        reco_df["Category"] = reco_df["Vendor_Prefix"].map(
-                            prefix_category_map
-                        )
-                        reco_df.loc[reco_df["Vendor_Prefix"] == "", "Category"] = (
-                            "Unmapped"
-                        )
-                        reco_df["Category"] = reco_df["Category"].fillna("Unmapped")
-
-                        reco_df["Dept"] = reco_df["Vendor_Prefix"].map(prefix_dept_map)
-                        reco_df["Payment_Terms"] = (
-                            reco_df["Vendor_Prefix"]
-                            .map(prefix_terms_map)
-                            .apply(
-                                lambda x: pd.to_numeric(x, errors="coerce")
-                                if pd.notna(x)
-                                else 0
-                            )
-                        )
-                        reco_df.loc[
-                            reco_df["Vendor_Prefix"] == "",
-                            ["Dept", "Payment_Terms", "Vendor_Name"],
-                        ] = pd.NA
-
-                        # Extract last 4 digits from CC_Number for reco ID
-                        def get_cc_last4(cc_number):
-                            """Extract last 4 digits from CC number, handling various formats."""
-                            if pd.isna(cc_number):
-                                return "0000"
-                            cc_str = str(cc_number).strip()
-                            # Remove any non-digit characters and get last 4 digits
-                            digits_only = "".join(filter(str.isdigit, cc_str))
-                            if len(digits_only) >= 4:
-                                return digits_only[-4:]
-                            # If less than 4 digits, pad with zeros
-                            return digits_only.zfill(4)[-4:]
-
-                        # Get the most common CC number's last 4 digits from batch_df
-                        if "CC_Number" in batch_df.columns:
-                            cc_numbers = batch_df["CC_Number"].dropna()
-                            if not cc_numbers.empty:
-                                cc_number_counts = cc_numbers.value_counts()
-                                most_common_cc = (
-                                    cc_number_counts.index[0]
-                                    if len(cc_number_counts) > 0
-                                    else None
-                                )
-                                cc_last4 = (
-                                    get_cc_last4(most_common_cc)
-                                    if most_common_cc is not None
-                                    else "0000"
-                                )
-                            else:
-                                cc_last4 = "0000"
-                        else:
-                            cc_last4 = "0000"
-
-                        base_reco_id = datetime.utcnow().strftime("RECO-%Y%m%d-%H%M%S")
-                        reco_id = f"{base_reco_id}-{cc_last4}"
-                        reco_df["Reco_ID"] = reco_id
-
-                        export_columns = [
-                            "Reco_ID",
-                            "Import_Batch_ID",
-                            "CC_Reference_ID",
-                            "CC_Txn_Date",
-                            "CC_Description",
-                            "CC_Amt",
-                            "Vendor_Prefix",
-                            "Vendor_Name",
-                            "Category",
-                            "Dept",
-                            "Payment_Terms",
-                        ]
-                        # Ensure CC_Number is not included in export columns
-                        if "CC_Number" in export_columns:
-                            export_columns.remove("CC_Number")
-
-                        reco_output = reco_df[export_columns]
-                        reco_path = reco_dir / f"{reco_id}"
-                        write_parquet(reco_output, reco_path)
-
-                        existing_df.loc[
-                            existing_df["Import_Batch_ID"].astype(str)
-                            == selected_batch,
-                            "Reco_ID",
-                        ] = reco_id
-                        write_parquet(existing_df, cc_path)
-
-                        st.session_state["reco_success"] = (
-                            f"Reco file {reco_id} created from batch {selected_batch}."
-                        )
-                        st.session_state["selected_reco_id"] = reco_id
-                        st.session_state["pending_active_page"] = "Reco"
-
-                        if hasattr(st, "rerun"):
-                            st.rerun()
-                        else:  # pragma: no cover
-                            st.experimental_rerun()
-
         st.subheader("Existing Credit Card Records")
         st.caption(f"{len(filtered_df)} of {len(existing_df)} records shown")
-        st.dataframe(filtered_df, hide_index=True, use_container_width=True)
+        # Display dataframe without Reco_ID column
+        display_df = filtered_df.drop(columns=["Reco_ID"], errors="ignore")
+        st.dataframe(display_df, hide_index=True, use_container_width=True)
 
+    st.warning(
+        "Please use CSV format and the **CC Date** should be in the format MM/DD/YYYY and **CC Amount** should be a number.",
+        icon="⚠️",
+    )
     # Use dynamic key based on upload counter to force reset after upload
     upload_counter = st.session_state.get("cc_upload_counter", 0)
     uploaded_file = st.file_uploader(
@@ -1579,7 +2070,7 @@ def render_cc_data() -> None:
         return
 
     st.subheader("Uploaded File Preview")
-    st.dataframe(incoming_df.head(), hide_index=True, use_container_width=True)
+    st.caption(f"{len(incoming_df)} records found")
 
     st.markdown("### Map uploaded columns to required fields")
     st.caption(
@@ -1676,12 +2167,35 @@ def render_cc_data() -> None:
         )
         return
 
+    # Convert CC_Txn_Date to string for validation
+    if "CC_Txn_Date" in aligned_df.columns:
+        aligned_df["CC_Txn_Date"] = (
+            aligned_df["CC_Txn_Date"].astype(object).astype(str).str.strip()
+        )
+        aligned_df["CC_Txn_Date"] = (
+            aligned_df["CC_Txn_Date"].replace("nan", "").replace("None", "")
+        )
+
+    # Validate CC_Txn_Date format (MM/DD/YYYY)
+    if "CC_Txn_Date" in aligned_df.columns:
+        is_valid, invalid_rows = validate_date_format_mmddyyyy(
+            aligned_df["CC_Txn_Date"], "CC_Txn_Date"
+        )
+        if not is_valid:
+            invalid_dates = aligned_df.loc[invalid_rows, "CC_Txn_Date"].tolist()
+            invalid_dates_str = ", ".join([str(d) for d in invalid_dates[:10]])
+            suffix = "..." if len(invalid_dates) > 10 else ""
+            st.error(
+                f"CC_Txn_Date must be in MM/DD/YYYY format. Invalid dates found: {invalid_dates_str}{suffix}"
+            )
+            return
+
     aligned_df["CC_Txn_Date"] = pd.to_datetime(
-        aligned_df["CC_Txn_Date"], errors="coerce"
+        aligned_df["CC_Txn_Date"], format="%m/%d/%Y", errors="coerce"
     )
     if aligned_df["CC_Txn_Date"].isna().any():
         st.error(
-            "Unable to parse CC_Txn_Date for all rows. Please ensure the dates are valid."
+            "Unable to parse CC_Txn_Date for all rows. Please ensure the dates are in MM/DD/YYYY format."
         )
         return
 
@@ -1721,7 +2235,7 @@ def render_cc_data() -> None:
     # Process each date group separately to create batches per date
     all_batches = []
     combined_df = existing_df.copy()
-    base_timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     batch_counter = 0
 
     for date_group in sorted(unique_dates):
@@ -1762,10 +2276,8 @@ def render_cc_data() -> None:
 
         # Create batch ID with timestamp, counter, and date suffix for uniqueness
         batch_counter += 1
-        date_suffix = date_group.strftime("%Y%m%d")  # Add date to batch ID for clarity
-        batch_id = (
-            f"CCBATCH-{base_timestamp}-{batch_counter:02d}-{cc_last4}-{date_suffix}"
-        )
+        date_suffix = date_group.strftime("%m%d%Y")  # Add date to batch ID for clarity
+        batch_id = f"CCBATCH-{cc_last4}-{date_suffix}"
 
         date_df["Import_Batch_ID"] = batch_id
         date_df["Reco_ID"] = pd.NA
@@ -1814,103 +2326,85 @@ def render_reco() -> None:
         unsafe_allow_html=True,
     )
     st.markdown("*Reconcile credit card transactions with purchase orders*")
-    # st.write(
-    #     "Run reconciliation workflows and surface key exceptions here. "
-    #     "Add summaries, downloadable reports, and action buttons."
-    # )
 
     success_message = st.session_state.pop("reco_success", None)
     if success_message:
         st.success(success_message)
 
-    reco_dir = Path("records/reco")
-    reco_dir.mkdir(parents=True, exist_ok=True)
-
-    reco_files = sorted(
-        reco_dir.glob("*.parquet"), key=lambda path: path.stat().st_mtime, reverse=True
-    )
-
-    if not reco_files:
-        st.info("No reconciliation files available yet.")
-        return
-
-    available_reco_ids = [path.stem for path in reco_files]
-
-    default_reco_id = st.session_state.get("selected_reco_id")
-    if default_reco_id not in available_reco_ids:
-        default_index = 0
-    else:
-        default_index = available_reco_ids.index(default_reco_id)
-
-    selected_reco_id = st.selectbox(
-        "Select Reco File",
-        options=available_reco_ids,
-        index=default_index,
-        key="reco_file_selector",
-    )
-
-    st.session_state["selected_reco_id"] = selected_reco_id
-
-    selected_path_parquet = reco_dir / f"{selected_reco_id}.parquet"
-    selected_path_csv = reco_dir / f"{selected_reco_id}.csv"
-
+    # Load CC data to get available batches
+    cc_path = Path("records/cc")
     try:
-        if selected_path_parquet.exists():
-            reco_df = pd.read_parquet(selected_path_parquet, engine="pyarrow")
-        elif selected_path_csv.exists():
-            reco_df = pd.read_csv(selected_path_csv)
-            # Convert to Parquet for future use
-            write_parquet(reco_df, reco_dir / f"{selected_reco_id}")
-        else:
-            st.error(f"Reco file {selected_reco_id} not found.")
-            return
+        cc_df = read_parquet_with_fallback(cc_path)
+    except FileNotFoundError:
+        st.info("No credit card data found. Please upload CC transactions first.")
+        return
     except Exception as exc:  # pylint: disable=broad-except
-        st.error(f"Unable to read reco file {selected_reco_id}: {exc}")
+        st.error(f"Unable to read CC data: {exc}")
         return
 
-    header_col_title, header_col_button = st.columns([8, 1], gap="small")
-    with header_col_title:
-        st.subheader(f"Reco File: {selected_reco_id}")
-    with header_col_button:
-        rollback_clicked = st.button(
-            "Rollback",
-            type="secondary",
-            key="reco_rollback_button",
-            use_container_width=True,
-        )
-    if rollback_clicked:
-        try:
-            # Delete both Parquet and CSV versions if they exist
-            if selected_path_parquet.exists():
-                selected_path_parquet.unlink()
-            if selected_path_csv.exists():
-                selected_path_csv.unlink()
-        except Exception as exc:  # pylint: disable=broad-except
-            st.error(f"Unable to delete reco file: {exc}")
-        else:
-            cc_path = Path("records/cc")
-            try:
-                cc_df = read_parquet_with_fallback(cc_path)
-            except Exception as exc:  # pylint: disable=broad-except
-                st.error(f"Unable to update CC records: {exc}")
-            else:
-                if "Reco_ID" in cc_df.columns:
-                    cc_df.loc[
-                        cc_df["Reco_ID"].astype(str) == selected_reco_id,
-                        "Reco_ID",
-                    ] = pd.NA
-                    write_parquet(cc_df, cc_path)
+    if cc_df.empty:
+        st.info("No credit card data available. Please upload CC transactions first.")
+        return
 
-            st.session_state["selected_reco_id"] = None
-            st.session_state["reco_success"] = (
-                f"Reco file {selected_reco_id} has been rolled back."
-            )
-            st.session_state["pending_active_page"] = "CC Data"
-            if hasattr(st, "rerun"):
-                st.rerun()
-            else:  # pragma: no cover
-                st.experimental_rerun()
+    # Get available batches
+    batch_series = cc_df["Import_Batch_ID"].fillna("Unknown")
+    batch_counts = batch_series.value_counts().sort_index()
+    batch_options = [
+        f"{batch_id} ({count} rows)"
+        for batch_id, count in batch_counts.items()
+        if batch_id != "Unknown"
+    ]
+
+    if not batch_options:
+        st.info("No batches available for reconciliation.")
+        return
+
+    # Batch selection
+    selected_batch_display = st.selectbox(
+        "Select CC Batch to Reconcile",
+        options=["Select a batch"] + batch_options,
+        index=0,
+        key="reco_batch_selector",
+    )
+
+    if selected_batch_display == "Select a batch":
+        st.info("Please select a batch to run reconciliation.")
+        return
+
+    selected_batch = selected_batch_display.split(" (", maxsplit=1)[0]
+
+    # Get batch data
+    batch_df = cc_df[cc_df["Import_Batch_ID"].astype(str) == selected_batch].copy()
+
+    if batch_df.empty:
+        st.error("No transactions found for the selected batch.")
+        return
+
+    # Check if we have in-memory reco data or need to run reconciliation
+    current_reco_batch = st.session_state.get("current_reco_batch")
+    reco_df = st.session_state.get("reco_df")
+
+    # Clear reco data if batch changed
+    if current_reco_batch is not None and current_reco_batch != selected_batch:
+        st.session_state.pop("reco_df", None)
+        st.session_state.pop("current_reco_batch", None)
+        reco_df = None
+
+    # Automatically run reconciliation if no reco data exists or batch changed
+    if reco_df is None:
+        try:
+            with st.spinner(f"Running reconciliation for batch {selected_batch}..."):
+                reco_df = run_reconciliation(batch_df)
+                st.session_state["reco_df"] = reco_df
+                st.session_state["current_reco_batch"] = selected_batch
+        except Exception as exc:  # pylint: disable=broad-except
+            st.error(f"Unable to run reconciliation: {exc}")
             return
+
+    # Use the in-memory reco_df
+    if reco_df is None or reco_df.empty:
+        st.error("No reconciliation data available.")
+        return
     display_df = reco_df.drop(columns=["Import_Batch_ID"], errors="ignore")
     category_series = display_df["Category"].astype(str).str.upper()
     common_df = display_df[category_series == "COMMON"]
@@ -1950,12 +2444,14 @@ def render_reco() -> None:
         )
         results_base_data = results_base.copy()
         results_base["CC_Txn_Date_dt"] = pd.to_datetime(
-            results_base["CC_Txn_Date"], dayfirst=True, errors="coerce"
+            results_base["CC_Txn_Date"], errors="coerce"
         )
         # Convert Payment_Terms to numeric, defaulting to 0 for missing/null values
         results_base["Payment_Terms_Numeric"] = pd.to_numeric(
             results_base["Payment_Terms"], errors="coerce"
         ).fillna(0)
+        # Also ensure Payment_Terms column itself is numeric for grouping/merging
+        results_base["Payment_Terms"] = results_base["Payment_Terms_Numeric"]
         # Calculate date window: Start = T - Payment_Terms - grace_days
         # End = T + grace_days (only if Payment_Terms = 0), else End = T
         results_base["Window_Start"] = (
@@ -1968,8 +2464,13 @@ def render_reco() -> None:
             results_base["Payment_Terms_Numeric"] > 0,
             results_base["CC_Txn_Date_dt"] + pd.Timedelta(days=grace_days),
         )
+        # Deduplicate results_base by CC_Reference_ID to avoid double counting
+        # This ensures each transaction is counted only once
+        results_base_unique = results_base.drop_duplicates(
+            subset=["CC_Reference_ID"], keep="first"
+        )
         results_df = (
-            results_base.groupby(results_group_cols)
+            results_base_unique.groupby(results_group_cols)
             .agg(
                 Total_CC_Amount=("CC_Amt", "sum"),
                 Transaction_Count=("CC_Reference_ID", "nunique"),
@@ -1993,10 +2494,27 @@ def render_reco() -> None:
             po_df["PO_Amount"] = pd.to_numeric(
                 po_df["PO_Amount"], errors="coerce"
             ).fillna(0.0)
-            po_df["PO_Date"] = pd.to_datetime(
-                po_df["PO_Date"], dayfirst=True, errors="coerce"
+            # Use CC_Charge_Amount for reconciliation (PO_Amount including CC fee)
+            # If CC_Charge_Amount doesn't exist or is 0, fall back to PO_Amount
+            if "CC_Charge_Amount" in po_df.columns:
+                po_df["CC_Charge_Amount"] = pd.to_numeric(
+                    po_df["CC_Charge_Amount"], errors="coerce"
+                ).fillna(0.0)
+                # Use CC_Charge_Amount if it's greater than 0, otherwise use PO_Amount
+                po_df["Comparison_Amount"] = po_df["CC_Charge_Amount"].where(
+                    po_df["CC_Charge_Amount"] > 0, po_df["PO_Amount"]
+                )
+            else:
+                # CC_Charge_Amount column doesn't exist, use PO_Amount
+                po_df["Comparison_Amount"] = po_df["PO_Amount"]
+            po_df["PO_Date"] = pd.to_datetime(po_df["PO_Date"], errors="coerce")
+            # Deduplicate PO by PO_Number to avoid counting same PO multiple times
+            # Keep the first occurrence of each PO_Number
+            if "PO_Number" in po_df.columns:
+                po_df = po_df.drop_duplicates(subset=["PO_Number"], keep="first")
+            po_summary = pd.DataFrame(
+                columns=results_group_cols + ["Comparison_Amount"]
             )
-            po_summary = pd.DataFrame(columns=results_group_cols + ["PO_Amount"])
             window_cols = results_base[
                 results_group_cols + ["Window_Start", "Window_End", "CC_Txn_Date_dt"]
             ].copy()
@@ -2010,42 +2528,113 @@ def render_reco() -> None:
                     subset=results_group_cols, keep="first"
                 )
             if not window_cols.empty and not po_df.empty:
-                po_merge = window_cols.merge(
-                    po_df[["Vendor_Prefix", "PO_Date", "PO_Amount", "PO_Number"]],
-                    on="Vendor_Prefix",
-                    how="left",
-                )
-                valid_mask = (
-                    po_merge["PO_Date"].notna()
-                    & po_merge["Window_Start"].notna()
-                    & po_merge["Window_End"].notna()
-                    & (po_merge["PO_Date"] >= po_merge["Window_Start"])
-                    & (po_merge["PO_Date"] <= po_merge["Window_End"])
-                )
-                if valid_mask.any():
-                    po_merge_data = po_merge.loc[valid_mask].copy()
-                    po_summary = (
-                        po_merge_data.groupby(results_group_cols, dropna=False)[
-                            "PO_Amount"
-                        ]
-                        .sum()
-                        .reset_index()
+                # Filter PO data by vendor prefix first to reduce merge size
+                unique_vendors = window_cols["Vendor_Prefix"].dropna().unique()
+                po_df_filtered = po_df[
+                    po_df["Vendor_Prefix"].isin(unique_vendors)
+                ].copy()
+
+                if not po_df_filtered.empty:
+                    # Ensure Dept column exists in PO data and normalize it
+                    if "Dept" in po_df_filtered.columns:
+                        po_df_filtered["Dept"] = (
+                            po_df_filtered["Dept"].astype(str).str.strip().str.upper()
+                        )
+                    else:
+                        # If Dept not in PO, we can't match by dept - this is a data issue
+                        st.warning(
+                            "PO data missing Dept column. PO matching may be inaccurate."
+                        )
+
+                    # Normalize Dept in window_cols for consistent matching
+                    if "Dept" in window_cols.columns:
+                        window_cols["Dept"] = (
+                            window_cols["Dept"].astype(str).str.strip().str.upper()
+                        )
+
+                    # Merge on both Vendor_Prefix and Dept
+                    merge_keys = ["Vendor_Prefix"]
+                    if (
+                        "Dept" in po_df_filtered.columns
+                        and "Dept" in window_cols.columns
+                    ):
+                        merge_keys.append("Dept")
+
+                    po_merge = window_cols.merge(
+                        po_df_filtered[
+                            merge_keys
+                            + ["PO_Date", "Comparison_Amount", "PO_Number", "PO_Amount"]
+                        ],
+                        on=merge_keys,
+                        how="left",
                     )
+                    valid_mask = (
+                        po_merge["PO_Date"].notna()
+                        & po_merge["Window_Start"].notna()
+                        & po_merge["Window_End"].notna()
+                        & (po_merge["PO_Date"] >= po_merge["Window_Start"])
+                        & (po_merge["PO_Date"] <= po_merge["Window_End"])
+                    )
+                    if valid_mask.any():
+                        po_merge_data = po_merge.loc[valid_mask].copy()
+                        # Deduplicate by PO_Number to ensure each PO is counted only once per group
+                        po_merge_data = po_merge_data.drop_duplicates(
+                            subset=results_group_cols + ["PO_Number"], keep="first"
+                        )
+                        po_summary = (
+                            po_merge_data.groupby(results_group_cols, dropna=False)[
+                                "Comparison_Amount"
+                            ]
+                            .sum()
+                            .reset_index()
+                        )
+                    else:
+                        po_summary = pd.DataFrame(
+                            columns=results_group_cols + ["Comparison_Amount"]
+                        )
+                        po_merge_data = pd.DataFrame()
                 else:
                     po_summary = pd.DataFrame(
-                        columns=results_group_cols + ["PO_Amount"]
+                        columns=results_group_cols + ["Comparison_Amount"]
                     )
                     po_merge_data = pd.DataFrame()
+            else:
+                po_summary = pd.DataFrame(
+                    columns=results_group_cols + ["Comparison_Amount"]
+                )
+                po_merge_data = pd.DataFrame()
         except Exception as exc:  # pylint: disable=broad-except
             st.warning(f"Unable to load PO summary: {exc}")
-            po_summary = pd.DataFrame(columns=results_group_cols + ["PO_Amount"])
+            po_summary = pd.DataFrame(
+                columns=results_group_cols + ["Comparison_Amount"]
+            )
             po_merge_data = pd.DataFrame()
+
+        # Ensure Payment_Terms has consistent type in both dataframes before merging
+        if "Payment_Terms" in results_df.columns:
+            results_df["Payment_Terms"] = pd.to_numeric(
+                results_df["Payment_Terms"], errors="coerce"
+            ).fillna(0)
+        if "Payment_Terms" in po_summary.columns:
+            po_summary["Payment_Terms"] = pd.to_numeric(
+                po_summary["Payment_Terms"], errors="coerce"
+            ).fillna(0)
+
+        # Ensure other merge columns have consistent types
+        for col in results_group_cols:
+            if col in results_df.columns and col in po_summary.columns:
+                # Convert to string for text columns, numeric for Payment_Terms
+                if col == "Payment_Terms":
+                    continue  # Already handled above
+                else:
+                    results_df[col] = results_df[col].astype(str).str.strip()
+                    po_summary[col] = po_summary[col].astype(str).str.strip()
 
         results_df = results_df.merge(
             po_summary,
             on=results_group_cols,
             how="left",
-        ).rename(columns={"PO_Amount": "Total_PO_Amount"})
+        ).rename(columns={"Comparison_Amount": "Total_PO_Amount"})
         results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
         results_df["Flag"] = np.where(
             results_df["Total_CC_Amount"] > results_df["Total_PO_Amount"],
@@ -2314,8 +2903,13 @@ def render_reco() -> None:
                 else:
                     # Group by description (normalized) instead of CC_Reference_ID
                     working_df = common_df.copy()
+                    # Deduplicate by CC_Reference_ID to avoid double counting amounts
+                    if "CC_Reference_ID" in working_df.columns:
+                        working_df = working_df.drop_duplicates(
+                            subset=["CC_Reference_ID"], keep="first"
+                        )
                     working_df["Amount"] = pd.to_numeric(
-                        common_df[amt_column], errors="coerce"
+                        working_df[amt_column], errors="coerce"
                     )
 
                     if desc_column:
@@ -2357,12 +2951,28 @@ def render_reco() -> None:
                             else len(group)
                         )
 
+                        # Get Vendor_Prefix (should be same for all rows in group)
+                        vendor_prefix_value = ""
+                        if "Vendor_Prefix" in group.columns:
+                            vendor_prefixes = (
+                                group["Vendor_Prefix"]
+                                .dropna()
+                                .astype(str)
+                                .str.strip()
+                                .unique()
+                                .tolist()
+                            )
+                            vendor_prefix_value = (
+                                vendor_prefixes[0] if vendor_prefixes else ""
+                            )
+
                         return pd.Series(
                             {
                                 "Description": description_value,
                                 "Amount": total_amount,
                                 "Transaction_Count": transaction_count,
                                 "Dept": "",
+                                "Vendor_Prefix": vendor_prefix_value,
                             }
                         )
 
@@ -2380,8 +2990,18 @@ def render_reco() -> None:
                 if "Transaction_Count" not in display_df.columns:
                     display_df["Transaction_Count"] = 1
 
+                # Ensure Vendor_Prefix column exists
+                if "Vendor_Prefix" not in display_df.columns:
+                    display_df["Vendor_Prefix"] = ""
+
                 display_df = display_df[
-                    ["Description", "Amount", "Transaction_Count", "Dept"]
+                    [
+                        "Description",
+                        "Amount",
+                        "Transaction_Count",
+                        "Dept",
+                        "Vendor_Prefix",
+                    ]
                 ]
 
                 display_df["Amount"] = display_df["Amount"].apply(
@@ -2390,16 +3010,28 @@ def render_reco() -> None:
                     else value
                 )
 
+                # Load saved Dept mappings from file (by CC_Reference_ID, aggregated by description)
+                # Only considers CC_Reference_IDs in current common_df (batch-specific)
+                saved_dept_map = get_dept_mappings_for_common(common_df)
+
+                # Merge with session state (session state takes precedence for current session)
                 existing_dept_choices: dict[str, str] = st.session_state.setdefault(
                     "common_dept_choices", {}
                 )
+                # Update session state with saved mappings if not already set
+                for desc_norm, dept in saved_dept_map.items():
+                    if desc_norm not in existing_dept_choices:
+                        existing_dept_choices[desc_norm] = dept
 
                 # Auto-assign FBM if total amount < 100
                 def assign_dept(row):
                     desc_key = str(row["Description"]).strip().upper()
-                    # Check if user has already selected a dept for this description
+                    # Check session state first (user's current selection)
                     if desc_key in existing_dept_choices:
                         return existing_dept_choices[desc_key]
+                    # Check saved mappings
+                    if desc_key in saved_dept_map:
+                        return saved_dept_map[desc_key]
                     # Auto-assign FBM if amount < 100
                     if pd.notna(row["Amount"]) and float(row["Amount"]) < 100:
                         return "FBM"
@@ -2583,6 +3215,9 @@ def render_reco() -> None:
                                 .tolist()
                             )
 
+                            # Save Dept mapping for these reference IDs (batch-specific)
+                            save_dept_mappings(matching_ref_ids, dept_value)
+
                             # Remove all existing rows with these reference IDs
                             ref_mask = (
                                 reco_df["CC_Reference_ID"]
@@ -2693,84 +3328,20 @@ def render_reco() -> None:
                             )
 
                         if auto_processed_descriptions:
-                            try:
-                                write_parquet(reco_df, selected_path_parquet)
-                                # Also save CSV for compatibility
-                                reco_df.to_csv(selected_path_csv, index=False)
-                            except Exception as exc:  # pylint: disable=broad-except
-                                st.error(f"Unable to update reconciliation file: {exc}")
-                            else:
-                                summary_descs = ", ".join(
-                                    auto_processed_descriptions[:5]
-                                )
-                                if len(auto_processed_descriptions) > 5:
-                                    summary_descs += ", ..."
-                                st.success(
-                                    f"Auto-processed {len(auto_processed_descriptions)} description(s) with sum < $100 as FBM: "
-                                    + summary_descs
-                                )
-                                # Reload reco_df after processing
-                                reco_df = read_parquet_with_fallback(
-                                    selected_path_parquet
-                                )
-                                # Reload common_df to reflect changes
-                                display_df = reco_df.drop(
-                                    columns=["Import_Batch_ID"], errors="ignore"
-                                )
-                                category_series = (
-                                    display_df["Category"].astype(str).str.upper()
-                                )
-                                common_df = display_df[category_series == "COMMON"]
-                                # Recalculate display_df after removing auto-processed items
-                                if not common_df.empty:
-                                    working_df = common_df.copy()
-                                    working_df["Amount"] = pd.to_numeric(
-                                        common_df[amt_column], errors="coerce"
-                                    )
-                                    if desc_column:
-                                        working_df["_norm_desc"] = (
-                                            working_df[desc_column]
-                                            .astype(str)
-                                            .str.strip()
-                                            .str.upper()
-                                        )
-                                    else:
-                                        working_df["_norm_desc"] = ""
-                                    display_df = (
-                                        working_df.groupby("_norm_desc", as_index=False)
-                                        .apply(agg_desc_group)
-                                        .reset_index(drop=True)
-                                    )
-                                    if "_norm_desc" in display_df.columns:
-                                        display_df = display_df.drop(
-                                            columns=["_norm_desc"]
-                                        )
-                                    if "Transaction_Count" not in display_df.columns:
-                                        display_df["Transaction_Count"] = 1
-                                    display_df = display_df[
-                                        [
-                                            "Description",
-                                            "Amount",
-                                            "Transaction_Count",
-                                            "Dept",
-                                        ]
-                                    ]
-                                    display_df["Amount"] = display_df["Amount"].apply(
-                                        lambda value: round(float(value), 2)
-                                        if pd.notna(value) and value != ""
-                                        else value
-                                    )
-                                else:
-                                    display_df = pd.DataFrame(
-                                        columns=[
-                                            "Description",
-                                            "Amount",
-                                            "Transaction_Count",
-                                            "Dept",
-                                        ]
-                                    )
-                                # Rerun to refresh the page
+                            # Update session state with modified reco_df
+                            st.session_state["reco_df"] = reco_df
+                            summary_descs = ", ".join(auto_processed_descriptions[:5])
+                            if len(auto_processed_descriptions) > 5:
+                                summary_descs += ", ..."
+                            st.success(
+                                f"Auto-processed {len(auto_processed_descriptions)} description(s) with sum < $100 as FBM: "
+                                + summary_descs
+                            )
+                            # Rerun to refresh the page
+                            if hasattr(st, "rerun"):
                                 st.rerun()
+                            else:  # pragma: no cover
+                                st.experimental_rerun()
 
                 with st.form("common_apply_form", clear_on_submit=False):
                     edited_df = st.data_editor(
@@ -2798,6 +3369,11 @@ def render_reco() -> None:
                                 required=False,
                                 help="Choose the department. Amounts < $100 auto-assign FBM.",
                             ),
+                            "Vendor_Prefix": st.column_config.TextColumn(
+                                "Vendor Prefix",
+                                disabled=True,
+                                help="Current vendor prefix for this description group.",
+                            ),
                             "Apply": st.column_config.CheckboxColumn(
                                 "Apply",
                                 help=(
@@ -2824,6 +3400,50 @@ def render_reco() -> None:
                 )
                 edited_df["Apply"] = edited_df["Apply"].fillna(False).astype(bool)
 
+                # Save Dept selections to file by CC_Reference_ID (even if not applied)
+                # Only saves for CC_Reference_IDs in current common_df (batch-specific)
+                desc_column = next(
+                    (
+                        col
+                        for col in ("CC_Description", "Description")
+                        if col in common_df.columns
+                    ),
+                    None,
+                )
+                if desc_column:
+                    for _, row in edited_df.iterrows():
+                        if row["Dept"] in {"FBA", "FBM"}:
+                            desc_value = str(row["Description"]).strip()
+                            desc_norm = desc_value.upper()
+
+                            # Find all CC_Reference_IDs with this description in current common_df
+                            # (common_df is already filtered by selected batch)
+                            desc_mask = (
+                                common_df[desc_column]
+                                .astype(str)
+                                .str.strip()
+                                .str.upper()
+                                == desc_norm
+                            )
+                            matching_rows = common_df.loc[desc_mask]
+
+                            if (
+                                not matching_rows.empty
+                                and "CC_Reference_ID" in matching_rows.columns
+                            ):
+                                ref_ids = (
+                                    matching_rows["CC_Reference_ID"]
+                                    .dropna()
+                                    .astype(str)
+                                    .str.strip()
+                                    .unique()
+                                    .tolist()
+                                )
+                                if ref_ids:
+                                    # Save mapping for these specific CC_Reference_IDs (batch-specific)
+                                    save_dept_mappings(ref_ids, row["Dept"])
+
+                # Update session state
                 st.session_state["common_dept_choices"] = {
                     str(row["Description"]).strip().upper(): row["Dept"]
                     for _, row in edited_df.iterrows()
@@ -3067,6 +3687,9 @@ def render_reco() -> None:
                                     .tolist()
                                 )
 
+                                # Save Dept mapping for these reference IDs (batch-specific)
+                                save_dept_mappings(matching_ref_ids, dept_value)
+
                                 # Remove all existing rows with these reference IDs
                                 ref_mask = (
                                     reco_df["CC_Reference_ID"]
@@ -3185,32 +3808,20 @@ def render_reco() -> None:
                                 )
 
                             if processed_descriptions:
-                                try:
-                                    write_parquet(
-                                        reco_df, reco_dir / f"{selected_reco_id}"
-                                    )
-                                except Exception as exc:  # pylint: disable=broad-except
-                                    st.error(
-                                        f"Unable to update reconciliation file: {exc}"
-                                    )
-                                else:
-                                    summary_descs = ", ".join(
-                                        processed_descriptions[:5]
-                                    )
-                                    if len(processed_descriptions) > 5:
-                                        summary_descs += ", ..."
-                                    st.session_state["reco_success"] = (
-                                        f"Updated {len(processed_descriptions)} description group(s): "
-                                        + summary_descs
-                                    )
-                                    st.session_state["selected_reco_id"] = (
-                                        selected_reco_id
-                                    )
-                                    # Don't set pending_active_page since we're already on Reco page
-                                    if hasattr(st, "rerun"):
-                                        st.rerun()
-                                    else:  # pragma: no cover
-                                        st.experimental_rerun()
+                                # Update session state with modified reco_df
+                                st.session_state["reco_df"] = reco_df
+                                summary_descs = ", ".join(processed_descriptions[:5])
+                                if len(processed_descriptions) > 5:
+                                    summary_descs += ", ..."
+                                st.session_state["reco_success"] = (
+                                    f"Updated {len(processed_descriptions)} description group(s): "
+                                    + summary_descs
+                                )
+                                # Don't set pending_active_page since we're already on Reco page
+                                if hasattr(st, "rerun"):
+                                    st.rerun()
+                                else:  # pragma: no cover
+                                    st.experimental_rerun()
 
     with tab_unmapped:
         if unmapped_df.empty:
@@ -3282,12 +3893,27 @@ def render_reco() -> None:
                             .fillna(0.0)
                             .sum()
                         )
+                    # Get Vendor_Prefix (should be same for all rows in group)
+                    vendor_prefix_value = ""
+                    if "Vendor_Prefix" in group.columns:
+                        vendor_prefixes = (
+                            group["Vendor_Prefix"]
+                            .dropna()
+                            .astype(str)
+                            .str.strip()
+                            .unique()
+                            .tolist()
+                        )
+                        vendor_prefix_value = (
+                            vendor_prefixes[0] if vendor_prefixes else ""
+                        )
                     grouped_records.append(
                         {
                             "description_key": description_key,
                             "display_description": display_description,
                             "count": count_value,
                             "total_amount": total_amount,
+                            "vendor_prefix": vendor_prefix_value,
                         }
                     )
 
@@ -3366,6 +3992,10 @@ def render_reco() -> None:
                                         record["total_amount"]
                                         for record in grouped_records
                                     ],
+                                    "Vendor_Prefix": [
+                                        record.get("vendor_prefix", "")
+                                        for record in grouped_records
+                                    ],
                                     "Vendor": ["Select a vendor"]
                                     * len(grouped_records),
                                     "Apply": [False] * len(grouped_records),
@@ -3387,6 +4017,11 @@ def render_reco() -> None:
                                             "Total CC Amount",
                                             format="$%0.2f",
                                             step=0.01,
+                                        ),
+                                        "Vendor_Prefix": st.column_config.TextColumn(
+                                            "Vendor Prefix",
+                                            disabled=True,
+                                            help="Current vendor prefix for this description group.",
                                         ),
                                         "Vendor": st.column_config.SelectboxColumn(
                                             "Vendor",
@@ -3547,68 +4182,57 @@ def render_reco() -> None:
                                 )
 
                             if updates_applied:
-                                try:
-                                    write_parquet(
-                                        reco_df, reco_dir / f"{selected_reco_id}"
-                                    )
-                                except Exception as exc:  # pylint: disable=broad-except
-                                    st.error(
-                                        f"Unable to update reconciliation file: {exc}"
-                                    )
-                                else:
-                                    st.session_state["reco_success"] = (
-                                        "Updated mappings for: "
-                                        + ", ".join(updates_applied[:5])
-                                        + (", ..." if len(updates_applied) > 5 else "")
-                                    )
-                                    st.session_state["selected_reco_id"] = (
-                                        selected_reco_id
-                                    )
-                                    # Don't set pending_active_page since we're already on Reco page
-                                    if mapping_updates:
-                                        if "DESCRIPTION" not in mappings_df.columns:
-                                            mappings_df["DESCRIPTION"] = pd.Series(
-                                                dtype=str
+                                # Update session state with modified reco_df
+                                st.session_state["reco_df"] = reco_df
+                                st.session_state["reco_success"] = (
+                                    "Updated mappings for: "
+                                    + ", ".join(updates_applied[:5])
+                                    + (", ..." if len(updates_applied) > 5 else "")
+                                )
+                                # Don't set pending_active_page since we're already on Reco page
+                                if mapping_updates:
+                                    mappings_path = Path("data/mappings")
+                                    if "DESCRIPTION" not in mappings_df.columns:
+                                        mappings_df["DESCRIPTION"] = pd.Series(
+                                            dtype=str
+                                        )
+                                    if "PREFIX" not in mappings_df.columns:
+                                        mappings_df["PREFIX"] = pd.Series(dtype=str)
+                                    for update in mapping_updates:
+                                        description_value = update["description"]
+                                        prefix_value = update["prefix"]
+                                        description_mask = (
+                                            mappings_df["DESCRIPTION"]
+                                            .astype(str)
+                                            .str.strip()
+                                            .str.casefold()
+                                            == description_value.casefold()
+                                        )
+                                        if description_mask.any():
+                                            mappings_df.loc[
+                                                description_mask, "PREFIX"
+                                            ] = prefix_value
+                                        else:
+                                            new_row_df = pd.DataFrame(
+                                                {
+                                                    "DESCRIPTION": [description_value],
+                                                    "PREFIX": [prefix_value],
+                                                }
                                             )
-                                        if "PREFIX" not in mappings_df.columns:
-                                            mappings_df["PREFIX"] = pd.Series(dtype=str)
-                                        for update in mapping_updates:
-                                            description_value = update["description"]
-                                            prefix_value = update["prefix"]
-                                            description_mask = (
-                                                mappings_df["DESCRIPTION"]
-                                                .astype(str)
-                                                .str.strip()
-                                                .str.casefold()
-                                                == description_value.casefold()
+                                            mappings_df = pd.concat(
+                                                [mappings_df, new_row_df],
+                                                ignore_index=True,
                                             )
-                                            if description_mask.any():
-                                                mappings_df.loc[
-                                                    description_mask, "PREFIX"
-                                                ] = prefix_value
-                                            else:
-                                                new_row_df = pd.DataFrame(
-                                                    {
-                                                        "DESCRIPTION": [
-                                                            description_value
-                                                        ],
-                                                        "PREFIX": [prefix_value],
-                                                    }
-                                                )
-                                                mappings_df = pd.concat(
-                                                    [mappings_df, new_row_df],
-                                                    ignore_index=True,
-                                                )
-                                        try:
-                                            write_parquet(mappings_df, mappings_path)
-                                        except Exception as exc:  # pylint: disable=broad-except
-                                            st.error(
-                                                f"Unable to update vendor mappings file: {exc}"
-                                            )
-                                    if hasattr(st, "rerun"):
-                                        st.rerun()
-                                    else:  # pragma: no cover
-                                        st.experimental_rerun()
+                                    try:
+                                        write_parquet(mappings_df, mappings_path)
+                                    except Exception as exc:  # pylint: disable=broad-except
+                                        st.error(
+                                            f"Unable to update vendor mappings file: {exc}"
+                                        )
+                                if hasattr(st, "rerun"):
+                                    st.rerun()
+                                else:  # pragma: no cover
+                                    st.experimental_rerun()
 
     with tab_others:
         if others_df.empty:
@@ -3712,31 +4336,46 @@ def render_reco() -> None:
                                     and not vendor_po_data.empty
                                 ):
                                     po_count = len(vendor_po_data)
-                                    po_total = vendor_po_data["PO_Amount"].sum()
+                                    # Use Comparison_Amount (CC_Charge_Amount) for total
+                                    if "Comparison_Amount" in vendor_po_data.columns:
+                                        po_total = vendor_po_data[
+                                            "Comparison_Amount"
+                                        ].sum()
+                                    else:
+                                        po_total = vendor_po_data["PO_Amount"].sum()
                                     po_total_col1, po_total_col2 = st.columns(2)
                                     with po_total_col1:
                                         st.metric("PO Count", po_count)
                                     with po_total_col2:
-                                        st.metric("Total", f"${po_total:,.2f}")
+                                        st.metric(
+                                            "Total PO (incl CC fee)",
+                                            f"${po_total:,.2f}",
+                                        )
                                 else:
                                     po_total_col1, po_total_col2 = st.columns(2)
                                     with po_total_col1:
                                         st.metric("PO Count", 0)
                                     with po_total_col2:
-                                        st.metric("Total", "$0.00")
+                                        st.metric("Total PO (incl CC fee)", "$0.00")
 
                             if vendor_po_data is not None and not vendor_po_data.empty:
                                 # Show PO details
-                                po_display = vendor_po_data[
+                                display_columns = [
+                                    "PO_Date",
+                                    "PO_Number",
+                                    "PO_Amount",
+                                ]
+                                # Add Comparison_Amount if it exists
+                                if "Comparison_Amount" in vendor_po_data.columns:
+                                    display_columns.append("Comparison_Amount")
+                                display_columns.extend(
                                     [
-                                        "PO_Date",
-                                        "PO_Number",
-                                        "PO_Amount",
                                         "CC_Txn_Date",
                                         "Window_Start",
                                         "Window_End",
                                     ]
-                                ].copy()
+                                )
+                                po_display = vendor_po_data[display_columns].copy()
                                 po_display["PO_Date"] = po_display[
                                     "PO_Date"
                                 ].dt.strftime("%Y-%m-%d")
