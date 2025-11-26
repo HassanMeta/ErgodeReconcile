@@ -676,7 +676,139 @@ def render_masters() -> None:
         if error_message:
             st.error(error_message)
 
-        with st.expander("Add Vendor Master Entry", expanded=False):
+        st.markdown("### ✨ Editable Vendor Master Table")
+        st.caption(
+            "Edit vendor information directly in the table below. Add new rows by typing in the empty row at the bottom."
+        )
+
+        # Prepare dataframe for editing
+        edit_df = master_df.copy()
+
+        # Convert numeric payment terms to string for better display
+        if "PAYMENT TERMS" in edit_df.columns:
+            edit_df["PAYMENT TERMS"] = edit_df["PAYMENT TERMS"].astype(str).str.strip()
+
+        # Convert CC FEE to numeric
+        if "CC FEE" in edit_df.columns:
+            edit_df["CC FEE"] = pd.to_numeric(
+                edit_df["CC FEE"], errors="coerce"
+            ).fillna(0.0)
+
+        with st.form("vendor_master_table_form"):
+            edited_df = st.data_editor(
+                edit_df,
+                num_rows="dynamic",  # Allow adding/deleting rows
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "PREFIX": st.column_config.TextColumn(
+                        "Vendor Prefix",
+                        help="Vendor prefix code (max 20 chars, will be uppercase)",
+                        max_chars=20,
+                        required=True,
+                    ),
+                    "VENDOR_NAME": st.column_config.TextColumn(
+                        "Vendor Name",
+                        help="Full vendor name (max 100 chars)",
+                        max_chars=100,
+                    ),
+                    "CATEGORY": st.column_config.SelectboxColumn(
+                        "Category",
+                        options=category_options,
+                        help="Select vendor category",
+                        required=True,
+                    ),
+                    "DEPT": st.column_config.SelectboxColumn(
+                        "Department",
+                        options=dept_options,
+                        help="Select department (FBA or FBM)",
+                        required=True,
+                    ),
+                    "PAYMENT TERMS": st.column_config.SelectboxColumn(
+                        "Payment Terms",
+                        options=payment_term_options,
+                        help="Select payment terms",
+                        required=True,
+                    ),
+                    "CC FEE": st.column_config.NumberColumn(
+                        "CC Fee",
+                        help="Credit card fee rate (e.g., 0.03 for 3%)",
+                        min_value=0.0,
+                        max_value=1.0,
+                        step=0.001,
+                        format="%.4f",
+                    ),
+                },
+                key="vendor_master_editor",
+            )
+
+            save_button = st.form_submit_button(
+                "💾 Save All Changes", type="primary", use_container_width=True
+            )
+
+        if save_button:
+            # Validate and save
+            validation_errors = []
+
+            # Clean and validate data
+            edited_df["PREFIX"] = (
+                edited_df["PREFIX"].astype(str).str.strip().str.upper()
+            )
+            edited_df["VENDOR_NAME"] = edited_df["VENDOR_NAME"].astype(str).str.strip()
+            edited_df["CATEGORY"] = edited_df["CATEGORY"].astype(str).str.strip()
+            edited_df["DEPT"] = edited_df["DEPT"].astype(str).str.strip()
+            edited_df["PAYMENT TERMS"] = (
+                edited_df["PAYMENT TERMS"].astype(str).str.strip()
+            )
+
+            # Remove completely empty rows
+            edited_df = edited_df[edited_df["PREFIX"] != ""]
+
+            # Check for required fields
+            if edited_df["PREFIX"].isna().any() or (edited_df["PREFIX"] == "").any():
+                validation_errors.append("All rows must have a Vendor Prefix.")
+
+            # Check for invalid characters in PREFIX
+            for idx, prefix in edited_df["PREFIX"].items():
+                if prefix and any(
+                    not char.isalnum() for char in str(prefix) if not char.isspace()
+                ):
+                    validation_errors.append(
+                        f"Vendor Prefix '{prefix}' contains invalid characters. Use only letters, numbers, or spaces."
+                    )
+                    break
+
+            # Check for duplicates
+            duplicate_check = edited_df.groupby(
+                ["PREFIX", "VENDOR_NAME", "CATEGORY", "DEPT", "PAYMENT TERMS"]
+            ).size()
+            if (duplicate_check > 1).any():
+                validation_errors.append(
+                    "Duplicate vendor entries found. Each combination of PREFIX, VENDOR_NAME, CATEGORY, DEPT, and PAYMENT TERMS must be unique."
+                )
+
+            if validation_errors:
+                st.session_state["vendor_master_error"] = "\n".join(validation_errors)
+            else:
+                try:
+                    write_parquet(edited_df, master_path)
+                    st.session_state["vendor_master_success"] = (
+                        f"✅ Successfully saved {len(edited_df)} vendor master entries!"
+                    )
+                except Exception as exc:
+                    st.session_state["vendor_master_error"] = (
+                        f"Unable to save vendor master file: {exc}"
+                    )
+
+            if hasattr(st, "rerun"):
+                st.rerun()
+            else:  # pragma: no cover
+                st.experimental_rerun()
+
+        st.markdown("---")
+        st.markdown("### Legacy Forms (for reference)")
+
+        with st.expander("Add Vendor Master Entry (Legacy)", expanded=False):
             modal_error = st.session_state.pop("vendor_modal_error", None)
             if modal_error:
                 st.error(modal_error)
