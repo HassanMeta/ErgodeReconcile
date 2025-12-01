@@ -3001,13 +3001,22 @@ def render_reco() -> None:
             if "Payment_Terms" in po_df.columns:
                 deduction_group_cols.append("Payment_Terms")
 
+            # Merge deductions with PO data to get vendor/dept info
+            # Use inner join to only include deductions for POs that exist
+            deduction_merged = deductions_df.merge(
+                po_df[merge_cols],
+                on="PO_Number",
+                how="inner",  # Only include deductions for POs that exist in po_df
+            )
+
+            # Ensure Deduction_Amount is numeric
+            deduction_merged["Deduction_Amount"] = pd.to_numeric(
+                deduction_merged["Deduction_Amount"], errors="coerce"
+            ).fillna(0.0)
+
+            # Group by vendor/dept/payment_terms and SUM all deductions
             deduction_summary = (
-                deductions_df.merge(
-                    po_df[merge_cols],
-                    on="PO_Number",
-                    how="left",
-                )
-                .groupby(deduction_group_cols)
+                deduction_merged.groupby(deduction_group_cols)
                 .agg({"Deduction_Amount": "sum"})
                 .reset_index()
                 .rename(columns={"Deduction_Amount": "Total_Deductions"})
