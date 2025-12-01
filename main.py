@@ -2894,6 +2894,15 @@ def render_reco() -> None:
                                     "PO_Amount",
                                     "sum",
                                 ),  # Base PO amount without CC fee
+                                Original_PO_Amount_Sum=(
+                                    "Original_PO_Amount",
+                                    "sum",
+                                )
+                                if "Original_PO_Amount" in po_merge_data.columns
+                                else (
+                                    "PO_Amount",
+                                    "sum",
+                                ),  # Original PO amount for CC charge calculation (before deductions)
                                 PO_Transaction_Count=(
                                     "PO_Number",
                                     "count",
@@ -2968,6 +2977,13 @@ def render_reco() -> None:
         )
         results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
         results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
+        # Store original PO amount sum for CC charge calculation
+        if "Original_PO_Amount_Sum" in results_df.columns:
+            results_df["Original_PO_Amount_Sum"] = results_df[
+                "Original_PO_Amount_Sum"
+            ].fillna(0.0)
+        else:
+            results_df["Original_PO_Amount_Sum"] = results_df["Base_PO_Amount"]
         results_df["PO_Transaction_Count"] = (
             results_df["PO_Transaction_Count"].fillna(0).astype(int)
         )
@@ -3005,10 +3021,11 @@ def render_reco() -> None:
         else:
             results_df["Total_Deductions"] = 0.0
 
-        # Calculate Total_CC_Charge = Total_PO_Amount - Base_PO_Amount
-        results_df["Total_CC_Charge"] = (
-            results_df["Total_PO_Amount"] - results_df["Base_PO_Amount"]
-        )
+        # Calculate Total_CC_Charge from ORIGINAL amounts (before deductions)
+        # This ensures deductions don't affect CC charge calculation
+        # We'll calculate it after we have CC_Fee from master data
+        # For now, set a placeholder that will be updated after CC_Fee is loaded
+        results_df["Total_CC_Charge"] = 0.0
         results_df["Flag"] = np.where(
             results_df["Total_CC_Amount"] > results_df["Total_PO_Amount"],
             "Red Flag",
@@ -3076,14 +3093,24 @@ def render_reco() -> None:
                     results_df = results_df.drop(
                         columns=["_lookup_key"], errors="ignore"
                     )
+
+                    # Now calculate Total_CC_Charge from original amounts
+                    # Total_CC_Charge = Original_PO_Amount * CC_Fee
+                    results_df["Total_CC_Charge"] = (
+                        results_df["Original_PO_Amount_Sum"] * results_df["CC_Fee"]
+                    )
                 else:
                     results_df["CC_Fee"] = 0.0
+                    # If no CC_Fee, CC charge is 0
+                    results_df["Total_CC_Charge"] = 0.0
             else:
                 results_df["Vendor_Name"] = ""
                 results_df["CC_Fee"] = 0.0
+                results_df["Total_CC_Charge"] = 0.0
         except Exception:  # pylint: disable=broad-except
             results_df["Vendor_Name"] = ""
             results_df["CC_Fee"] = 0.0
+            results_df["Total_CC_Charge"] = 0.0
 
     tab_labels = [
         f"Results ({len(results_df)})",
@@ -4866,10 +4893,10 @@ def render_reco() -> None:
                                         "Available_Balance": "Available",
                                         "Adjusted_PO_Amount": "Adjusted Amount",
                                         "Comparison_Amount": "Comparison",
+                                        "Deduct_Amount": "Deduct",
                                         "CC_Txn_Date": "CC Date",
                                         "Window_Start": "Window Start",
                                         "Window_End": "Window End",
-                                        "Deduct_Amount": "💸 Deduct",
                                     }
                                 )
 
@@ -4914,6 +4941,13 @@ def render_reco() -> None:
                                                 format="$%.2f",
                                                 disabled=True,
                                             ),
+                                            "Deduct": st.column_config.NumberColumn(
+                                                "Deduct",
+                                                help="Enter amount to deduct from this PO",
+                                                min_value=0.0,
+                                                format="$%.2f",
+                                                width="small",
+                                            ),
                                             "CC Date": st.column_config.TextColumn(
                                                 "CC Date", width="small", disabled=True
                                             ),
@@ -4926,13 +4960,6 @@ def render_reco() -> None:
                                                 "Window End",
                                                 width="small",
                                                 disabled=True,
-                                            ),
-                                            "💸 Deduct": st.column_config.NumberColumn(
-                                                "💸 Deduct",
-                                                help="Enter amount to deduct from this PO",
-                                                min_value=0.0,
-                                                format="$%.2f",
-                                                width="small",
                                             ),
                                         },
                                         key="po_deduction_table",
@@ -4961,7 +4988,7 @@ def render_reco() -> None:
                                     if submit_deductions:
                                         for idx, row in edited_df.iterrows():
                                             po_num = row["PO Number"]
-                                            deduct_amt = row.get("💸 Deduct", 0.0)
+                                            deduct_amt = row.get("Deduct", 0.0)
                                             if deduct_amt > 0:
                                                 deduction_inputs[po_num] = deduct_amt
 
