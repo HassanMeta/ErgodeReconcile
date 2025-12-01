@@ -47,6 +47,154 @@ def validate_date_format_mmddyyyy(
     return len(invalid_rows) == 0, invalid_rows
 
 
+# PO Deduction Management Functions
+def load_po_deductions() -> pd.DataFrame:
+    """Load all PO deductions from storage"""
+    deductions_path = Path("records/po_deductions")
+    try:
+        df = read_parquet_with_fallback(deductions_path)
+        # Ensure required columns exist
+        required_cols = [
+            "PO_Number",
+            "Deduction_Amount",
+            "CC_Batch_ID",
+            "Deduction_Date",
+            "Reason",
+            "Timestamp",
+        ]
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = pd.NA
+        return df
+    except FileNotFoundError:
+        return pd.DataFrame(
+            columns=[
+                "PO_Number",
+                "Deduction_Amount",
+                "CC_Batch_ID",
+                "Deduction_Date",
+                "Reason",
+                "Timestamp",
+            ]
+        )
+    except Exception:  # pylint: disable=broad-except
+        return pd.DataFrame(
+            columns=[
+                "PO_Number",
+                "Deduction_Amount",
+                "CC_Batch_ID",
+                "Deduction_Date",
+                "Reason",
+                "Timestamp",
+            ]
+        )
+
+
+def get_po_available_balance(
+    po_number: str, po_original_amount: float
+) -> tuple[float, float]:
+    """
+    Calculate available balance for a PO after all deductions.
+
+    Returns:
+        tuple: (total_deductions, available_balance)
+    """
+    deductions_df = load_po_deductions()
+
+    if deductions_df.empty:
+        return 0.0, po_original_amount
+
+    po_deductions = deductions_df[deductions_df["PO_Number"] == po_number]
+    total_deductions = (
+        po_deductions["Deduction_Amount"].sum() if not po_deductions.empty else 0.0
+    )
+    available_balance = po_original_amount - total_deductions
+
+    return total_deductions, available_balance
+
+
+def save_po_deduction(
+    po_number: str,
+    amount: float,
+    po_original_amount: float,
+    cc_batch_id: str,
+    reason: str = "",
+) -> float:
+    """
+    Save a new PO deduction with validation.
+
+    Args:
+        po_number: PO number to deduct from
+        amount: Deduction amount
+        po_original_amount: Original PO amount (for validation)
+        cc_batch_id: CC Batch ID this deduction is associated with
+        reason: Optional reason for the deduction
+
+    Returns:
+        float: New available balance after deduction
+
+    Raises:
+        ValueError: If insufficient balance or invalid amount
+    """
+    deductions_path = Path("records/po_deductions")
+
+    # Validate amount
+    if amount <= 0:
+        raise ValueError("Deduction amount must be greater than 0")
+
+    # Get current balance
+    total_deductions, available_balance = get_po_available_balance(
+        po_number, po_original_amount
+    )
+
+    # Check if sufficient balance
+    if amount > available_balance:
+        raise ValueError(
+            f"Insufficient balance. Available: ${available_balance:.2f}, "
+            f"Requested: ${amount:.2f}"
+        )
+
+    # Check if PO is already depleted
+    if available_balance <= 0:
+        raise ValueError(f"PO {po_number} is fully depleted. No deductions allowed.")
+
+    # Create new deduction record
+    existing = load_po_deductions()
+
+    new_deduction = pd.DataFrame(
+        {
+            "PO_Number": [str(po_number)],
+            "Deduction_Amount": [float(amount)],
+            "CC_Batch_ID": [str(cc_batch_id)],
+            "Deduction_Date": [pd.Timestamp.now().date()],
+            "Reason": [str(reason) if reason else ""],
+            "Timestamp": [pd.Timestamp.now()],
+        }
+    )
+
+    combined = pd.concat([existing, new_deduction], ignore_index=True)
+
+    # Ensure directory exists
+    deductions_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save the deduction
+    try:
+        write_parquet(combined, deductions_path)
+    except Exception as e:
+        raise ValueError(f"Failed to save deduction to file: {str(e)}")
+
+    # Verify the save worked
+    try:
+        verify_df = load_po_deductions()
+        if verify_df.empty or po_number not in verify_df["PO_Number"].values:
+            raise ValueError("Deduction was not saved correctly - verification failed")
+    except Exception as e:
+        raise ValueError(f"Failed to verify deduction save: {str(e)}")
+
+    # Return new available balance
+    return available_balance - amount
+
+
 # Parquet helper functions for fast data storage
 def read_parquet_with_fallback(file_path: Path) -> pd.DataFrame:
     """
@@ -676,135 +824,6 @@ def render_masters() -> None:
         if error_message:
             st.error(error_message)
 
-        st.markdown("### ✨ Editable Vendor Master Table")
-        st.caption(
-            "Edit vendor information directly in the table below. Add new rows by typing in the empty row at the bottom."
-        )
-
-        # Prepare dataframe for editing
-        edit_df = master_df.copy()
-
-        # Convert numeric payment terms to string for better display
-        if "PAYMENT TERMS" in edit_df.columns:
-            edit_df["PAYMENT TERMS"] = edit_df["PAYMENT TERMS"].astype(str).str.strip()
-
-        # Convert CC FEE to numeric
-        if "CC FEE" in edit_df.columns:
-            edit_df["CC FEE"] = pd.to_numeric(
-                edit_df["CC FEE"], errors="coerce"
-            ).fillna(0.0)
-
-        with st.form("vendor_master_table_form"):
-            edited_df = st.data_editor(
-                edit_df,
-                num_rows="dynamic",  # Allow adding/deleting rows
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "PREFIX": st.column_config.TextColumn(
-                        "Vendor Prefix",
-                        help="Vendor prefix code (max 20 chars, will be uppercase)",
-                        max_chars=20,
-                        required=True,
-                    ),
-                    "VENDOR_NAME": st.column_config.TextColumn(
-                        "Vendor Name",
-                        help="Full vendor name (max 100 chars)",
-                        max_chars=100,
-                    ),
-                    "CATEGORY": st.column_config.SelectboxColumn(
-                        "Category",
-                        options=category_options,
-                        help="Select vendor category",
-                        required=True,
-                    ),
-                    "DEPT": st.column_config.SelectboxColumn(
-                        "Department",
-                        options=dept_options,
-                        help="Select department (FBA or FBM)",
-                        required=True,
-                    ),
-                    "PAYMENT TERMS": st.column_config.SelectboxColumn(
-                        "Payment Terms",
-                        options=payment_term_options,
-                        help="Select payment terms",
-                        required=True,
-                    ),
-                    "CC FEE": st.column_config.NumberColumn(
-                        "CC Fee",
-                        help="Credit card fee rate (e.g., 0.03 for 3%)",
-                        min_value=0.0,
-                        max_value=1.0,
-                        step=0.001,
-                        format="%.4f",
-                    ),
-                },
-                key="vendor_master_editor",
-            )
-
-            save_button = st.form_submit_button(
-                "💾 Save All Changes", type="primary", use_container_width=True
-            )
-
-        if save_button:
-            # Validate and save
-            validation_errors = []
-
-            # Clean and validate data
-            edited_df["PREFIX"] = (
-                edited_df["PREFIX"].astype(str).str.strip().str.upper()
-            )
-            edited_df["VENDOR_NAME"] = edited_df["VENDOR_NAME"].astype(str).str.strip()
-            edited_df["CATEGORY"] = edited_df["CATEGORY"].astype(str).str.strip()
-            edited_df["DEPT"] = edited_df["DEPT"].astype(str).str.strip()
-            edited_df["PAYMENT TERMS"] = (
-                edited_df["PAYMENT TERMS"].astype(str).str.strip()
-            )
-
-            # Remove completely empty rows
-            edited_df = edited_df[edited_df["PREFIX"] != ""]
-
-            # Check for required fields
-            if edited_df["PREFIX"].isna().any() or (edited_df["PREFIX"] == "").any():
-                validation_errors.append("All rows must have a Vendor Prefix.")
-
-            # Check for invalid characters in PREFIX
-            for idx, prefix in edited_df["PREFIX"].items():
-                if prefix and any(
-                    not char.isalnum() for char in str(prefix) if not char.isspace()
-                ):
-                    validation_errors.append(
-                        f"Vendor Prefix '{prefix}' contains invalid characters. Use only letters, numbers, or spaces."
-                    )
-                    break
-
-            # Check for duplicates
-            duplicate_check = edited_df.groupby(
-                ["PREFIX", "VENDOR_NAME", "CATEGORY", "DEPT", "PAYMENT TERMS"]
-            ).size()
-            if (duplicate_check > 1).any():
-                validation_errors.append(
-                    "Duplicate vendor entries found. Each combination of PREFIX, VENDOR_NAME, CATEGORY, DEPT, and PAYMENT TERMS must be unique."
-                )
-
-            if validation_errors:
-                st.session_state["vendor_master_error"] = "\n".join(validation_errors)
-            else:
-                try:
-                    write_parquet(edited_df, master_path)
-                    st.session_state["vendor_master_success"] = (
-                        f"✅ Successfully saved {len(edited_df)} vendor master entries!"
-                    )
-                except Exception as exc:
-                    st.session_state["vendor_master_error"] = (
-                        f"Unable to save vendor master file: {exc}"
-                    )
-
-            if hasattr(st, "rerun"):
-                st.rerun()
-            else:  # pragma: no cover
-                st.experimental_rerun()
-
         st.markdown("---")
         st.markdown("### Legacy Forms (for reference)")
 
@@ -1092,7 +1111,91 @@ def render_masters() -> None:
                                 st.experimental_rerun()
 
         st.markdown("### Existing Vendor Master Entries")
-        st.dataframe(master_df, hide_index=True, use_container_width=True)
+        st.caption(
+            "View and edit Payment Terms and CC Fee for existing vendors. "
+            "Other fields are read-only."
+        )
+
+        # Prepare dataframe for editing
+        edit_df = master_df.copy()
+
+        # Convert CC FEE to numeric if it exists
+        if "CC FEE" in edit_df.columns:
+            edit_df["CC FEE"] = pd.to_numeric(
+                edit_df["CC FEE"], errors="coerce"
+            ).fillna(0.0)
+        else:
+            edit_df["CC FEE"] = 0.0
+
+        with st.form("vendor_master_edit_form"):
+            edited_df = st.data_editor(
+                edit_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "PREFIX": st.column_config.TextColumn(
+                        "Vendor Prefix",
+                        help="Vendor prefix code (read-only)",
+                        disabled=True,
+                    ),
+                    "VENDOR_NAME": st.column_config.TextColumn(
+                        "Vendor Name",
+                        help="Full vendor name (read-only)",
+                        disabled=True,
+                    ),
+                    "CATEGORY": st.column_config.TextColumn(
+                        "Category",
+                        help="Vendor category (read-only)",
+                        disabled=True,
+                    ),
+                    "DEPT": st.column_config.TextColumn(
+                        "Department",
+                        help="Department (FBA or FBM) (read-only)",
+                        disabled=True,
+                    ),
+                    "PAYMENT TERMS": st.column_config.SelectboxColumn(
+                        "Payment Terms",
+                        options=payment_term_options,
+                        help="Select payment terms (editable)",
+                        required=True,
+                    ),
+                    "CC FEE": st.column_config.NumberColumn(
+                        "CC Fee",
+                        help="Credit card fee rate (e.g., 0.03 for 3%) (editable)",
+                        min_value=0.0,
+                        max_value=1.0,
+                        step=0.001,
+                        format="%.4f",
+                    ),
+                },
+                key="vendor_master_editor",
+            )
+
+            save_button = st.form_submit_button(
+                "💾 Save Changes", type="primary", use_container_width=True
+            )
+
+        if save_button:
+            try:
+                # Ensure CC FEE is numeric
+                if "CC FEE" in edited_df.columns:
+                    edited_df["CC FEE"] = pd.to_numeric(
+                        edited_df["CC FEE"], errors="coerce"
+                    ).fillna(0.0)
+
+                write_parquet(edited_df, master_path)
+                st.session_state["vendor_master_success"] = (
+                    f"✅ Successfully updated {len(edited_df)} vendor master entries!"
+                )
+            except Exception as exc:
+                st.session_state["vendor_master_error"] = (
+                    f"Unable to save vendor master file: {exc}"
+                )
+
+            if hasattr(st, "rerun"):
+                st.rerun()
+            else:  # pragma: no cover
+                st.experimental_rerun()
 
     with tab2:
         try:
@@ -2561,6 +2664,7 @@ def render_reco() -> None:
                 "CC_Transaction_Count",
                 "Total_PO_Amount",
                 "PO_Transaction_Count",
+                "Total_Deductions",
                 "CC_Fee",
                 "Total_CC_Charge",
                 "Flag",
@@ -2645,6 +2749,64 @@ def render_reco() -> None:
                 # Total_PO_Amount column doesn't exist, use PO_Amount
                 po_df["Comparison_Amount"] = po_df["PO_Amount"]
             po_df["PO_Date"] = pd.to_datetime(po_df["PO_Date"], errors="coerce")
+
+            # Apply PO deductions
+            deductions_df = load_po_deductions()
+            if not deductions_df.empty and "PO_Number" in po_df.columns:
+                # Calculate total deductions per PO
+                po_deductions = (
+                    deductions_df.groupby("PO_Number")
+                    .agg({"Deduction_Amount": "sum"})
+                    .reset_index()
+                )
+                po_deductions.rename(
+                    columns={"Deduction_Amount": "Total_Deductions"}, inplace=True
+                )
+
+                # Merge with PO data
+                po_df = po_df.merge(po_deductions, on="PO_Number", how="left")
+                po_df["Total_Deductions"] = po_df["Total_Deductions"].fillna(0.0)
+
+                # Store original amounts
+                po_df["Original_PO_Amount"] = po_df["PO_Amount"].copy()
+
+                # Calculate adjusted amount (after deductions)
+                po_df["Adjusted_PO_Amount"] = (
+                    po_df["PO_Amount"] - po_df["Total_Deductions"]
+                )
+
+                # Update Comparison_Amount to use adjusted amount
+                if "Total_PO_Amount" in po_df.columns:
+                    # Recalculate Total_PO_Amount with adjusted amount
+                    if "CC_Fee" in po_df.columns:
+                        po_df["Adjusted_Total_PO_Amount"] = po_df[
+                            "Adjusted_PO_Amount"
+                        ] * (1 + po_df["CC_Fee"])
+                    else:
+                        po_df["Adjusted_Total_PO_Amount"] = po_df["Adjusted_PO_Amount"]
+                    po_df["Comparison_Amount"] = po_df["Adjusted_Total_PO_Amount"]
+                else:
+                    po_df["Comparison_Amount"] = po_df["Adjusted_PO_Amount"]
+
+                # Filter out fully depleted POs
+                depleted_pos = (
+                    po_df[po_df["Adjusted_PO_Amount"] <= 0]["PO_Number"]
+                    .unique()
+                    .tolist()
+                )
+                if depleted_pos:
+                    st.info(
+                        f"ℹ️ Excluded {len(depleted_pos)} fully depleted PO(s) from reconciliation: "
+                        f"{', '.join(str(p) for p in depleted_pos[:5])}"
+                        f"{'...' if len(depleted_pos) > 5 else ''}"
+                    )
+                po_df = po_df[po_df["Adjusted_PO_Amount"] > 0].copy()
+            else:
+                # No deductions - use original amounts
+                po_df["Total_Deductions"] = 0.0
+                po_df["Original_PO_Amount"] = po_df["PO_Amount"]
+                po_df["Adjusted_PO_Amount"] = po_df["PO_Amount"]
+
             # Keep all PO rows including duplicates (multiple line items)
             # Don't aggregate - count every line item separately
             po_summary = pd.DataFrame(
@@ -2694,11 +2856,23 @@ def render_reco() -> None:
                     ):
                         merge_keys.append("Dept")
 
+                    # Include deduction columns in merge
+                    merge_columns = merge_keys + [
+                        "PO_Date",
+                        "Comparison_Amount",
+                        "PO_Number",
+                        "PO_Amount",
+                        "Original_PO_Amount",
+                        "Total_Deductions",
+                        "Adjusted_PO_Amount",
+                    ]
+                    # Only include columns that exist
+                    merge_columns = [
+                        col for col in merge_columns if col in po_df_filtered.columns
+                    ]
+
                     po_merge = window_cols.merge(
-                        po_df_filtered[
-                            merge_keys
-                            + ["PO_Date", "Comparison_Amount", "PO_Number", "PO_Amount"]
-                        ],
+                        po_df_filtered[merge_columns],
                         on=merge_keys,
                         how="left",
                     )
@@ -2797,6 +2971,40 @@ def render_reco() -> None:
         results_df["PO_Transaction_Count"] = (
             results_df["PO_Transaction_Count"].fillna(0).astype(int)
         )
+
+        # Calculate Total_Deductions per vendor/dept
+        if not deductions_df.empty:
+            # Group deductions by Vendor_Prefix and Dept from PO numbers
+            # Get available columns from po_df for merging
+            merge_cols = ["PO_Number", "Vendor_Prefix", "Dept"]
+            if "Payment_Terms" in po_df.columns:
+                merge_cols.append("Payment_Terms")
+
+            # Group by columns that exist in the merged data (exclude CC_Txn_Date)
+            deduction_group_cols = ["Vendor_Prefix", "Dept"]
+            if "Payment_Terms" in po_df.columns:
+                deduction_group_cols.append("Payment_Terms")
+
+            deduction_summary = (
+                deductions_df.merge(
+                    po_df[merge_cols],
+                    on="PO_Number",
+                    how="left",
+                )
+                .groupby(deduction_group_cols)
+                .agg({"Deduction_Amount": "sum"})
+                .reset_index()
+                .rename(columns={"Deduction_Amount": "Total_Deductions"})
+            )
+
+            # Merge using only the common columns
+            results_df = results_df.merge(
+                deduction_summary, on=deduction_group_cols, how="left"
+            )
+            results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
+        else:
+            results_df["Total_Deductions"] = 0.0
+
         # Calculate Total_CC_Charge = Total_PO_Amount - Base_PO_Amount
         results_df["Total_CC_Charge"] = (
             results_df["Total_PO_Amount"] - results_df["Base_PO_Amount"]
@@ -2967,6 +3175,12 @@ def render_reco() -> None:
             if "Total_PO_Amount" in results_display.columns:
                 results_display["Total_PO_Amount"] = results_display[
                     "Total_PO_Amount"
+                ].map(lambda x: f"${x:,.2f}")
+
+            # Format Total_Deductions as currency
+            if "Total_Deductions" in results_display.columns:
+                results_display["Total_Deductions"] = results_display[
+                    "Total_Deductions"
                 ].map(lambda x: f"${x:,.2f}")
 
             # Format amounts as currency (Total_CC_Charge already calculated above)
@@ -4586,37 +4800,344 @@ def render_reco() -> None:
                                         st.metric("Total PO (incl CC fee)", "$0.00")
 
                             if vendor_po_data is not None and not vendor_po_data.empty:
-                                # Show PO details
-                                display_columns = [
-                                    "PO_Date",
-                                    "PO_Number",
-                                    "PO_Amount",
-                                ]
-                                # Add Comparison_Amount if it exists
-                                if "Comparison_Amount" in vendor_po_data.columns:
-                                    display_columns.append("Comparison_Amount")
-                                display_columns.extend(
+                                # Prepare PO data with deduction columns
+                                po_table = vendor_po_data.drop_duplicates(
+                                    subset=["PO_Number"]
+                                ).copy()
+
+                                # Calculate available balance for each PO
+                                if "Original_PO_Amount" not in po_table.columns:
+                                    po_table["Original_PO_Amount"] = po_table[
+                                        "PO_Amount"
+                                    ]
+                                if "Total_Deductions" not in po_table.columns:
+                                    po_table["Total_Deductions"] = 0.0
+                                if "Adjusted_PO_Amount" not in po_table.columns:
+                                    po_table["Adjusted_PO_Amount"] = po_table[
+                                        "Original_PO_Amount"
+                                    ]
+
+                                po_table["Available_Balance"] = (
+                                    po_table["Original_PO_Amount"]
+                                    - po_table["Total_Deductions"]
+                                )
+
+                                # Add Deduct column for input
+                                po_table["Deduct_Amount"] = 0.0
+
+                                # Prepare display table
+                                display_table = po_table[
                                     [
+                                        "PO_Date",
+                                        "PO_Number",
+                                        "Original_PO_Amount",
+                                        "Total_Deductions",
+                                        "Available_Balance",
+                                        "Adjusted_PO_Amount",
+                                        "Comparison_Amount",
                                         "CC_Txn_Date",
                                         "Window_Start",
                                         "Window_End",
+                                        "Deduct_Amount",
                                     ]
+                                ].copy()
+
+                                # Format dates
+                                if "PO_Date" in display_table.columns:
+                                    display_table["PO_Date"] = display_table[
+                                        "PO_Date"
+                                    ].dt.strftime("%Y-%m-%d")
+                                if "Window_Start" in display_table.columns:
+                                    display_table["Window_Start"] = display_table[
+                                        "Window_Start"
+                                    ].dt.strftime("%Y-%m-%d")
+                                if "Window_End" in display_table.columns:
+                                    display_table["Window_End"] = display_table[
+                                        "Window_End"
+                                    ].dt.strftime("%Y-%m-%d")
+
+                                # Rename columns for display
+                                display_table = display_table.rename(
+                                    columns={
+                                        "PO_Date": "PO Date",
+                                        "PO_Number": "PO Number",
+                                        "Original_PO_Amount": "Original Amount",
+                                        "Total_Deductions": "Total Deducted",
+                                        "Available_Balance": "Available",
+                                        "Adjusted_PO_Amount": "Adjusted Amount",
+                                        "Comparison_Amount": "Comparison",
+                                        "CC_Txn_Date": "CC Date",
+                                        "Window_Start": "Window Start",
+                                        "Window_End": "Window End",
+                                        "Deduct_Amount": "💸 Deduct",
+                                    }
                                 )
-                                po_display = vendor_po_data[display_columns].copy()
-                                po_display["PO_Date"] = po_display[
-                                    "PO_Date"
-                                ].dt.strftime("%Y-%m-%d")
-                                po_display["Window_Start"] = po_display[
-                                    "Window_Start"
-                                ].dt.strftime("%Y-%m-%d")
-                                po_display["Window_End"] = po_display[
-                                    "Window_End"
-                                ].dt.strftime("%Y-%m-%d")
-                                st.dataframe(
-                                    po_display,
-                                    hide_index=True,
-                                    use_container_width=True,
-                                )
+
+                                # Create form for inline deductions
+                                with st.form("inline_po_deduction_form"):
+                                    # Editable dataframe
+                                    edited_df = st.data_editor(
+                                        display_table,
+                                        hide_index=True,
+                                        use_container_width=True,
+                                        column_config={
+                                            "PO Number": st.column_config.TextColumn(
+                                                "PO Number",
+                                                width="medium",
+                                                disabled=True,
+                                            ),
+                                            "PO Date": st.column_config.TextColumn(
+                                                "PO Date", width="small", disabled=True
+                                            ),
+                                            "Original Amount": st.column_config.NumberColumn(
+                                                "Original Amount",
+                                                format="$%.2f",
+                                                disabled=True,
+                                            ),
+                                            "Total Deducted": st.column_config.NumberColumn(
+                                                "Total Deducted",
+                                                format="$%.2f",
+                                                disabled=True,
+                                            ),
+                                            "Available": st.column_config.NumberColumn(
+                                                "Available",
+                                                format="$%.2f",
+                                                disabled=True,
+                                            ),
+                                            "Adjusted Amount": st.column_config.NumberColumn(
+                                                "Adjusted Amount",
+                                                format="$%.2f",
+                                                disabled=True,
+                                            ),
+                                            "Comparison": st.column_config.NumberColumn(
+                                                "Comparison",
+                                                format="$%.2f",
+                                                disabled=True,
+                                            ),
+                                            "CC Date": st.column_config.TextColumn(
+                                                "CC Date", width="small", disabled=True
+                                            ),
+                                            "Window Start": st.column_config.TextColumn(
+                                                "Window Start",
+                                                width="small",
+                                                disabled=True,
+                                            ),
+                                            "Window End": st.column_config.TextColumn(
+                                                "Window End",
+                                                width="small",
+                                                disabled=True,
+                                            ),
+                                            "💸 Deduct": st.column_config.NumberColumn(
+                                                "💸 Deduct",
+                                                help="Enter amount to deduct from this PO",
+                                                min_value=0.0,
+                                                format="$%.2f",
+                                                width="small",
+                                            ),
+                                        },
+                                        key="po_deduction_table",
+                                    )
+
+                                    st.markdown("---")
+
+                                    # Reason and submit
+                                    col_reason, col_submit = st.columns([3, 1])
+                                    with col_reason:
+                                        bulk_reason = st.text_input(
+                                            "reason_label",
+                                            placeholder="Reason for deductions (optional)",
+                                            key="inline_deduction_reason",
+                                            label_visibility="collapsed",
+                                        )
+                                    with col_submit:
+                                        submit_deductions = st.form_submit_button(
+                                            "Apply All Deductions",
+                                            type="primary",
+                                            use_container_width=True,
+                                        )
+
+                                    # Store deduction inputs from edited dataframe
+                                    deduction_inputs = {}
+                                    if submit_deductions:
+                                        for idx, row in edited_df.iterrows():
+                                            po_num = row["PO Number"]
+                                            deduct_amt = row.get("💸 Deduct", 0.0)
+                                            if deduct_amt > 0:
+                                                deduction_inputs[po_num] = deduct_amt
+
+                                    # Process deductions when form is submitted
+                                    if submit_deductions:
+                                        # Get CC Batch ID
+                                        cc_batch_id = None
+
+                                        if (
+                                            not results_base_data.empty
+                                            and "Import_Batch_ID"
+                                            in results_base_data.columns
+                                        ):
+                                            batch_ids = (
+                                                results_base_data["Import_Batch_ID"]
+                                                .dropna()
+                                                .unique()
+                                            )
+                                            if len(batch_ids) > 0:
+                                                cc_batch_id = batch_ids[0]
+
+                                        if not cc_batch_id:
+                                            cc_batch_id = st.session_state.get(
+                                                "current_reco_batch"
+                                            )
+
+                                        if (
+                                            not cc_batch_id
+                                            and vendor_cc_data is not None
+                                            and not vendor_cc_data.empty
+                                        ):
+                                            if (
+                                                "Import_Batch_ID"
+                                                in vendor_cc_data.columns
+                                            ):
+                                                batch_ids = (
+                                                    vendor_cc_data["Import_Batch_ID"]
+                                                    .dropna()
+                                                    .unique()
+                                                )
+                                                if len(batch_ids) > 0:
+                                                    cc_batch_id = batch_ids[0]
+
+                                        if not cc_batch_id:
+                                            st.error(
+                                                "Cannot determine CC Batch ID. Please ensure you have selected a CC batch."
+                                            )
+                                        else:
+                                            # Process all deductions
+                                            success_count = 0
+                                            error_count = 0
+                                            total_deducted = 0.0
+                                            errors = []
+
+                                            for (
+                                                po_num,
+                                                amount,
+                                            ) in deduction_inputs.items():
+                                                if amount > 0:
+                                                    try:
+                                                        po_row = po_table[
+                                                            po_table["PO_Number"]
+                                                            == po_num
+                                                        ].iloc[0]
+                                                        original = po_row[
+                                                            "Original_PO_Amount"
+                                                        ]
+
+                                                        save_po_deduction(
+                                                            po_num,
+                                                            amount,
+                                                            original,
+                                                            cc_batch_id,
+                                                            bulk_reason,
+                                                        )
+
+                                                        success_count += 1
+                                                        total_deducted += amount
+                                                    except ValueError as ve:
+                                                        error_count += 1
+                                                        errors.append(
+                                                            f"PO {po_num}: {str(ve)}"
+                                                        )
+                                                    except Exception as exc:
+                                                        error_count += 1
+                                                        errors.append(
+                                                            f"PO {po_num}: {str(exc)}"
+                                                        )
+
+                                            if success_count > 0:
+                                                st.success(
+                                                    f"✅ Successfully applied {success_count} deduction(s)!\n\n"
+                                                    f"Total Amount Deducted: ${total_deducted:,.2f}\n"
+                                                    f"CC Batch ID: {cc_batch_id}"
+                                                )
+
+                                            if error_count > 0:
+                                                st.error(
+                                                    f"❌ {error_count} deduction(s) failed:"
+                                                )
+                                                for error in errors:
+                                                    st.error(f"  • {error}")
+
+                                            if success_count > 0:
+                                                st.info(
+                                                    "🔄 Reloading reconciliation..."
+                                                )
+                                                st.session_state.pop("reco_df", None)
+                                                st.session_state.pop(
+                                                    "current_reco_batch", None
+                                                )
+                                                if hasattr(st, "rerun"):
+                                                    st.rerun()
+                                                else:
+                                                    st.experimental_rerun()
+
+                                # Add deduction history
+                                st.markdown("---")
+                                st.markdown("### 📜 Deduction History")
+
+                                deductions_df = load_po_deductions()
+                                if not deductions_df.empty:
+                                    # Filter for current vendor
+                                    vendor_deductions = deductions_df[
+                                        deductions_df["PO_Number"].str.startswith(
+                                            selected_vendor_prefix, na=False
+                                        )
+                                    ].sort_values("Timestamp", ascending=False)
+
+                                    if not vendor_deductions.empty:
+                                        display_deductions = vendor_deductions.copy()
+                                        display_deductions["Deduction_Amount"] = (
+                                            display_deductions["Deduction_Amount"].map(
+                                                lambda x: f"${x:,.2f}"
+                                            )
+                                        )
+
+                                        # Parse CC Batch to show date
+                                        if "CC_Batch_ID" in display_deductions.columns:
+                                            display_deductions["CC_Date"] = (
+                                                display_deductions["CC_Batch_ID"]
+                                                .str.extract(r"(\d{8})")[0]
+                                                .apply(
+                                                    lambda x: f"{x[0:2]}/{x[2:4]}/{x[4:]}"
+                                                    if pd.notna(x)
+                                                    else ""
+                                                )
+                                            )
+
+                                        display_cols = [
+                                            "PO_Number",
+                                            "Deduction_Amount",
+                                            "CC_Batch_ID",
+                                        ]
+                                        if "CC_Date" in display_deductions.columns:
+                                            display_cols.append("CC_Date")
+                                        display_cols.extend(["Reason", "Timestamp"])
+
+                                        # Only show columns that exist
+                                        display_cols = [
+                                            col
+                                            for col in display_cols
+                                            if col in display_deductions.columns
+                                        ]
+
+                                        st.dataframe(
+                                            display_deductions[display_cols],
+                                            hide_index=True,
+                                            use_container_width=True,
+                                        )
+                                    else:
+                                        st.info(
+                                            f"No deductions for vendor {selected_vendor_prefix}"
+                                        )
+                                else:
+                                    st.info("No deductions have been made yet")
                             else:
                                 st.info(
                                     f"No PO records matched for vendor {selected_vendor_prefix}"
