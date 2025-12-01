@@ -2824,26 +2824,23 @@ def render_reco() -> None:
                 po_df = po_df.merge(po_applications, on="PO_Number", how="left")
                 po_df["Total_Deductions"] = po_df["Total_Deductions"].fillna(0.0)
 
-                # Store original amounts
+                # Store original amounts (Total_PO_Amount - never changes)
                 po_df["Original_PO_Amount"] = po_df["Comparison_Amount"].copy()
 
-                # NEW LOGIC: Use Applied Amount if exists, otherwise use Original Amount
-                # Applied Amount = Total_Deductions (renamed concept)
-                # If Applied Amount > 0, use that for Total PO calculation
-                # If no Applied Amount, use Original Amount
+                # Applied Amount = Total of all applications made so far (across all CC batches)
                 po_df["Applied_Amount"] = po_df["Total_Deductions"]
-                po_df["Has_Application"] = po_df["Applied_Amount"] > 0
 
-                # Comparison_Amount = Applied Amount if applied, else Original Amount
+                # Calculate Balance = Original - Applied (remaining amount available)
+                po_df["Balance"] = po_df["Original_PO_Amount"] - po_df["Applied_Amount"]
+
+                # Comparison_Amount = Applied Amount if exists (> 0), else Original Amount
+                # This is used for Total PO calculation: Sum of (Applied if exists, else Original)
                 po_df["Comparison_Amount"] = po_df.apply(
                     lambda row: row["Applied_Amount"]
-                    if row["Has_Application"]
+                    if row["Applied_Amount"] > 0
                     else row["Original_PO_Amount"],
                     axis=1,
                 )
-
-                # Calculate balance (Original - Applied)
-                po_df["Balance"] = po_df["Original_PO_Amount"] - po_df["Applied_Amount"]
 
                 # For backward compatibility
                 po_df["Adjusted_PO_Amount"] = po_df["Comparison_Amount"]
@@ -2852,8 +2849,11 @@ def render_reco() -> None:
                 po_df["Total_Deductions"] = 0.0
                 po_df["Applied_Amount"] = 0.0
                 po_df["Original_PO_Amount"] = po_df["Comparison_Amount"].copy()
-                po_df["Has_Application"] = False
-                po_df["Balance"] = po_df["Original_PO_Amount"]
+                po_df["Balance"] = po_df[
+                    "Original_PO_Amount"
+                ]  # Balance = Original when nothing applied
+                # Comparison_Amount = Original (since Applied = 0)
+                po_df["Comparison_Amount"] = po_df["Original_PO_Amount"]
                 po_df["Adjusted_PO_Amount"] = po_df["Comparison_Amount"]
 
             # Keep all PO rows including duplicates (multiple line items)
@@ -4917,16 +4917,23 @@ def render_reco() -> None:
                                     "Total_Deductions"
                                 ].fillna(0.0)
 
+                                # Calculate Balance (Original - Applied) - remaining amount available
+                                po_table["Balance"] = (
+                                    po_table["Original_Amount"]
+                                    - po_table["Applied_Amount"]
+                                )
+
                                 # Add Apply column for input
                                 po_table["Apply_Input"] = 0.0
 
-                                # Prepare display table - simplified columns (no Balance)
+                                # Prepare display table with Balance column
                                 display_table = po_table[
                                     [
                                         "PO_Date",
                                         "PO_Number",
                                         "Original_Amount",
                                         "Applied_Amount",
+                                        "Balance",
                                         "CC_Txn_Date",
                                         "Window_Start",
                                         "Window_End",
@@ -4955,6 +4962,7 @@ def render_reco() -> None:
                                         "PO_Number": "PO Number",
                                         "Original_Amount": "Original Amount",
                                         "Applied_Amount": "Applied Amount",
+                                        "Balance": "Balance",
                                         "Apply_Input": "Apply",
                                         "CC_Txn_Date": "CC Date",
                                         "Window_Start": "Window Start",
@@ -4990,9 +4998,15 @@ def render_reco() -> None:
                                                 disabled=True,
                                                 help="Amount already applied to CC batches (0 if nothing applied)",
                                             ),
+                                            "Balance": st.column_config.NumberColumn(
+                                                "Balance",
+                                                format="$%.2f",
+                                                disabled=True,
+                                                help="Remaining amount available (Original - Applied). This is what will be used for Total PO calculation.",
+                                            ),
                                             "Apply": st.column_config.NumberColumn(
                                                 "Apply",
-                                                help="Enter amount to apply from this PO to current CC batch",
+                                                help="Enter amount to apply from this PO to current CC batch (cannot exceed Balance)",
                                                 min_value=0.0,
                                                 format="$%.2f",
                                                 width="small",
