@@ -121,17 +121,17 @@ def save_po_deduction(
     reason: str = "",
 ) -> float:
     """
-    Save a new PO deduction with validation.
+    Save a new PO application (amount applied to a CC batch).
 
     Args:
-        po_number: PO number to deduct from
-        amount: Deduction amount
+        po_number: PO number to apply amount from
+        amount: Amount to apply
         po_original_amount: Original PO amount (for validation)
-        cc_batch_id: CC Batch ID this deduction is associated with
-        reason: Optional reason for the deduction
+        cc_batch_id: CC Batch ID this application is associated with
+        reason: Optional reason for the application
 
     Returns:
-        float: New available balance after deduction
+        float: Remaining balance after application
 
     Raises:
         ValueError: If insufficient balance or invalid amount
@@ -140,10 +140,10 @@ def save_po_deduction(
 
     # Validate amount
     if amount <= 0:
-        raise ValueError("Deduction amount must be greater than 0")
+        raise ValueError("Apply amount must be greater than 0")
 
-    # Get current balance
-    total_deductions, available_balance = get_po_available_balance(
+    # Get current balance (Original - Already Applied)
+    total_applied, available_balance = get_po_available_balance(
         po_number, po_original_amount
     )
 
@@ -154,17 +154,17 @@ def save_po_deduction(
             f"Requested: ${amount:.2f}"
         )
 
-    # Check if PO is already depleted
+    # Check if PO is already fully applied
     if available_balance <= 0:
-        raise ValueError(f"PO {po_number} is fully depleted. No deductions allowed.")
+        raise ValueError(f"PO {po_number} is fully applied. No more amount available.")
 
-    # Create new deduction record
+    # Create new application record (using same table structure for backward compatibility)
     existing = load_po_deductions()
 
-    new_deduction = pd.DataFrame(
+    new_application = pd.DataFrame(
         {
             "PO_Number": [str(po_number)],
-            "Deduction_Amount": [float(amount)],
+            "Deduction_Amount": [float(amount)],  # Keep column name for compatibility
             "CC_Batch_ID": [str(cc_batch_id)],
             "Deduction_Date": [pd.Timestamp.now().date()],
             "Reason": [str(reason) if reason else ""],
@@ -172,26 +172,28 @@ def save_po_deduction(
         }
     )
 
-    combined = pd.concat([existing, new_deduction], ignore_index=True)
+    combined = pd.concat([existing, new_application], ignore_index=True)
 
     # Ensure directory exists
     deductions_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Save the deduction
+    # Save the application
     try:
         write_parquet(combined, deductions_path)
     except Exception as e:
-        raise ValueError(f"Failed to save deduction to file: {str(e)}")
+        raise ValueError(f"Failed to save application to file: {str(e)}")
 
     # Verify the save worked
     try:
         verify_df = load_po_deductions()
         if verify_df.empty or po_number not in verify_df["PO_Number"].values:
-            raise ValueError("Deduction was not saved correctly - verification failed")
+            raise ValueError(
+                "Application was not saved correctly - verification failed"
+            )
     except Exception as e:
-        raise ValueError(f"Failed to verify deduction save: {str(e)}")
+        raise ValueError(f"Failed to verify application save: {str(e)}")
 
-    # Return new available balance
+    # Return remaining balance
     return available_balance - amount
 
 
@@ -2805,62 +2807,54 @@ def render_reco() -> None:
                 po_df["Comparison_Amount"] = po_df["PO_Amount"]
             po_df["PO_Date"] = pd.to_datetime(po_df["PO_Date"], errors="coerce")
 
-            # Apply PO deductions
+            # Apply PO applications (amounts applied to CC batches)
             deductions_df = load_po_deductions()
             if not deductions_df.empty and "PO_Number" in po_df.columns:
-                # Calculate total deductions per PO
-                po_deductions = (
+                # Calculate total applied amount per PO
+                po_applications = (
                     deductions_df.groupby("PO_Number")
                     .agg({"Deduction_Amount": "sum"})
                     .reset_index()
                 )
-                po_deductions.rename(
+                po_applications.rename(
                     columns={"Deduction_Amount": "Total_Deductions"}, inplace=True
                 )
 
                 # Merge with PO data
-                po_df = po_df.merge(po_deductions, on="PO_Number", how="left")
+                po_df = po_df.merge(po_applications, on="PO_Number", how="left")
                 po_df["Total_Deductions"] = po_df["Total_Deductions"].fillna(0.0)
 
                 # Store original amounts
-                po_df["Original_PO_Amount"] = po_df["PO_Amount"].copy()
+                po_df["Original_PO_Amount"] = po_df["Comparison_Amount"].copy()
 
-                # Calculate adjusted amount (after deductions)
-                po_df["Adjusted_PO_Amount"] = (
-                    po_df["PO_Amount"] - po_df["Total_Deductions"]
+                # NEW LOGIC: Use Applied Amount if exists, otherwise use Original Amount
+                # Applied Amount = Total_Deductions (renamed concept)
+                # If Applied Amount > 0, use that for Total PO calculation
+                # If no Applied Amount, use Original Amount
+                po_df["Applied_Amount"] = po_df["Total_Deductions"]
+                po_df["Has_Application"] = po_df["Applied_Amount"] > 0
+
+                # Comparison_Amount = Applied Amount if applied, else Original Amount
+                po_df["Comparison_Amount"] = po_df.apply(
+                    lambda row: row["Applied_Amount"]
+                    if row["Has_Application"]
+                    else row["Original_PO_Amount"],
+                    axis=1,
                 )
 
-                # Update Comparison_Amount to use adjusted amount
-                if "Total_PO_Amount" in po_df.columns:
-                    # Recalculate Total_PO_Amount with adjusted amount
-                    if "CC_Fee" in po_df.columns:
-                        po_df["Adjusted_Total_PO_Amount"] = po_df[
-                            "Adjusted_PO_Amount"
-                        ] * (1 + po_df["CC_Fee"])
-                    else:
-                        po_df["Adjusted_Total_PO_Amount"] = po_df["Adjusted_PO_Amount"]
-                    po_df["Comparison_Amount"] = po_df["Adjusted_Total_PO_Amount"]
-                else:
-                    po_df["Comparison_Amount"] = po_df["Adjusted_PO_Amount"]
+                # Calculate balance (Original - Applied)
+                po_df["Balance"] = po_df["Original_PO_Amount"] - po_df["Applied_Amount"]
 
-                # Filter out fully depleted POs
-                depleted_pos = (
-                    po_df[po_df["Adjusted_PO_Amount"] <= 0]["PO_Number"]
-                    .unique()
-                    .tolist()
-                )
-                if depleted_pos:
-                    st.info(
-                        f"ℹ️ Excluded {len(depleted_pos)} fully depleted PO(s) from reconciliation: "
-                        f"{', '.join(str(p) for p in depleted_pos[:5])}"
-                        f"{'...' if len(depleted_pos) > 5 else ''}"
-                    )
-                po_df = po_df[po_df["Adjusted_PO_Amount"] > 0].copy()
+                # For backward compatibility
+                po_df["Adjusted_PO_Amount"] = po_df["Comparison_Amount"]
             else:
-                # No deductions - use original amounts
+                # No applications - use original amounts
                 po_df["Total_Deductions"] = 0.0
-                po_df["Original_PO_Amount"] = po_df["PO_Amount"]
-                po_df["Adjusted_PO_Amount"] = po_df["PO_Amount"]
+                po_df["Applied_Amount"] = 0.0
+                po_df["Original_PO_Amount"] = po_df["Comparison_Amount"].copy()
+                po_df["Has_Application"] = False
+                po_df["Balance"] = po_df["Original_PO_Amount"]
+                po_df["Adjusted_PO_Amount"] = po_df["Comparison_Amount"]
 
             # Keep all PO rows including duplicates (multiple line items)
             # Don't aggregate - count every line item separately
@@ -3252,6 +3246,22 @@ def render_reco() -> None:
             if flag_filter and flag_filter != "<All>":
                 results_df = results_df[results_df["Flag"].astype(str) == flag_filter]
             results_display = results_df.copy()
+
+            # Remove unwanted columns
+            columns_to_remove = [
+                "CC_Fee",
+                "Total_Deductions",
+                "Total_CC_Charge",
+                "Original_PO_Amount_Sum",
+                "Base_PO_Amount",
+            ]
+            results_display = results_display.drop(
+                columns=[
+                    col for col in columns_to_remove if col in results_display.columns
+                ],
+                errors="ignore",
+            )
+
             # Reorder columns to show Vendor_Name after Vendor_Prefix, and organize transaction counts
             if "Vendor_Name" in results_display.columns:
                 cols = list(results_display.columns)
@@ -3271,24 +3281,6 @@ def render_reco() -> None:
                 results_display["Total_PO_Amount"] = results_display[
                     "Total_PO_Amount"
                 ].map(lambda x: f"${x:,.2f}")
-
-            # Format Total_Deductions as currency
-            if "Total_Deductions" in results_display.columns:
-                results_display["Total_Deductions"] = results_display[
-                    "Total_Deductions"
-                ].map(lambda x: f"${x:,.2f}")
-
-            # Format amounts as currency (Total_CC_Charge already calculated above)
-            if "Total_CC_Charge" in results_display.columns:
-                results_display["Total_CC_Charge"] = results_display[
-                    "Total_CC_Charge"
-                ].map(lambda x: f"${x:,.2f}")
-
-            # Format CC_Fee as actual value (not percentage)
-            if "CC_Fee" in results_display.columns:
-                results_display["CC_Fee"] = results_display["CC_Fee"].map(
-                    lambda x: f"{x:.4f}" if pd.notna(x) else "0.0000"
-                )
 
             st.dataframe(results_display, hide_index=True, use_container_width=True)
 
@@ -4876,7 +4868,8 @@ def render_reco() -> None:
                                         subset=["PO_Number"], keep="first"
                                     )
                                     po_count = len(vendor_po_unique)
-                                    # Use Comparison_Amount (CC_Charge_Amount) for total
+                                    # Total PO = Sum of (Applied Amount if exists, else Original Amount)
+                                    # Comparison_Amount already has this logic applied
                                     if "Comparison_Amount" in vendor_po_unique.columns:
                                         po_total = vendor_po_unique[
                                             "Comparison_Amount"
@@ -4888,56 +4881,56 @@ def render_reco() -> None:
                                         st.metric("PO Count", po_count)
                                     with po_total_col2:
                                         st.metric(
-                                            "Total PO (incl CC fee)",
+                                            "Total PO",
                                             f"${po_total:,.2f}",
+                                            help="Sum of Applied Amount (if exists) or Original Amount for each PO",
                                         )
                                 else:
                                     po_total_col1, po_total_col2 = st.columns(2)
                                     with po_total_col1:
                                         st.metric("PO Count", 0)
                                     with po_total_col2:
-                                        st.metric("Total PO (incl CC fee)", "$0.00")
+                                        st.metric("Total PO", "$0.00")
 
                             if vendor_po_data is not None and not vendor_po_data.empty:
-                                # Prepare PO data with deduction columns
+                                # Prepare PO data with applied amount columns
                                 po_table = vendor_po_data.drop_duplicates(
                                     subset=["PO_Number"]
                                 ).copy()
 
-                                # Calculate available balance for each PO
-                                if "Original_PO_Amount" not in po_table.columns:
-                                    po_table["Original_PO_Amount"] = po_table[
-                                        "PO_Amount"
-                                    ]
-                                if "Total_Deductions" not in po_table.columns:
-                                    po_table["Total_Deductions"] = 0.0
-                                if "Adjusted_PO_Amount" not in po_table.columns:
-                                    po_table["Adjusted_PO_Amount"] = po_table[
+                                # Original Amount = Total_PO_Amount (always the original, never changes)
+                                if "Original_PO_Amount" in po_table.columns:
+                                    po_table["Original_Amount"] = po_table[
                                         "Original_PO_Amount"
                                     ]
+                                elif "Total_PO_Amount" in po_table.columns:
+                                    po_table["Original_Amount"] = po_table[
+                                        "Total_PO_Amount"
+                                    ]
+                                else:
+                                    po_table["Original_Amount"] = po_table["PO_Amount"]
 
-                                po_table["Available_Balance"] = (
-                                    po_table["Original_PO_Amount"]
-                                    - po_table["Total_Deductions"]
-                                )
+                                # Applied Amount = what has been applied so far (0 if nothing)
+                                if "Total_Deductions" not in po_table.columns:
+                                    po_table["Total_Deductions"] = 0.0
+                                po_table["Applied_Amount"] = po_table[
+                                    "Total_Deductions"
+                                ].fillna(0.0)
 
-                                # Add Deduct column for input
-                                po_table["Deduct_Amount"] = 0.0
+                                # Add Apply column for input
+                                po_table["Apply_Input"] = 0.0
 
-                                # Prepare display table
+                                # Prepare display table - simplified columns (no Balance)
                                 display_table = po_table[
                                     [
                                         "PO_Date",
                                         "PO_Number",
-                                        "Original_PO_Amount",
-                                        "Total_Deductions",
-                                        "Available_Balance",
-                                        "Adjusted_PO_Amount",
-                                        "Comparison_Amount",
+                                        "Original_Amount",
+                                        "Applied_Amount",
                                         "CC_Txn_Date",
                                         "Window_Start",
                                         "Window_End",
-                                        "Deduct_Amount",
+                                        "Apply_Input",
                                     ]
                                 ].copy()
 
@@ -4960,20 +4953,17 @@ def render_reco() -> None:
                                     columns={
                                         "PO_Date": "PO Date",
                                         "PO_Number": "PO Number",
-                                        "Original_PO_Amount": "Original Amount",
-                                        "Total_Deductions": "Total Deducted",
-                                        "Available_Balance": "Available",
-                                        "Adjusted_PO_Amount": "Adjusted Amount",
-                                        "Comparison_Amount": "Comparison",
-                                        "Deduct_Amount": "Deduct",
+                                        "Original_Amount": "Original Amount",
+                                        "Applied_Amount": "Applied Amount",
+                                        "Apply_Input": "Apply",
                                         "CC_Txn_Date": "CC Date",
                                         "Window_Start": "Window Start",
                                         "Window_End": "Window End",
                                     }
                                 )
 
-                                # Create form for inline deductions
-                                with st.form("inline_po_deduction_form"):
+                                # Create form for applying amounts
+                                with st.form("inline_po_apply_form"):
                                     # Editable dataframe
                                     edited_df = st.data_editor(
                                         display_table,
@@ -4992,30 +4982,17 @@ def render_reco() -> None:
                                                 "Original Amount",
                                                 format="$%.2f",
                                                 disabled=True,
+                                                help="Total PO amount including CC fee (never changes)",
                                             ),
-                                            "Total Deducted": st.column_config.NumberColumn(
-                                                "Total Deducted",
+                                            "Applied Amount": st.column_config.NumberColumn(
+                                                "Applied Amount",
                                                 format="$%.2f",
                                                 disabled=True,
+                                                help="Amount already applied to CC batches (0 if nothing applied)",
                                             ),
-                                            "Available": st.column_config.NumberColumn(
-                                                "Available",
-                                                format="$%.2f",
-                                                disabled=True,
-                                            ),
-                                            "Adjusted Amount": st.column_config.NumberColumn(
-                                                "Adjusted Amount",
-                                                format="$%.2f",
-                                                disabled=True,
-                                            ),
-                                            "Comparison": st.column_config.NumberColumn(
-                                                "Comparison",
-                                                format="$%.2f",
-                                                disabled=True,
-                                            ),
-                                            "Deduct": st.column_config.NumberColumn(
-                                                "Deduct",
-                                                help="Enter amount to deduct from this PO",
+                                            "Apply": st.column_config.NumberColumn(
+                                                "Apply",
+                                                help="Enter amount to apply from this PO to current CC batch",
                                                 min_value=0.0,
                                                 format="$%.2f",
                                                 width="small",
@@ -5034,7 +5011,7 @@ def render_reco() -> None:
                                                 disabled=True,
                                             ),
                                         },
-                                        key="po_deduction_table",
+                                        key="po_apply_table",
                                     )
 
                                     st.markdown("---")
@@ -5044,28 +5021,28 @@ def render_reco() -> None:
                                     with col_reason:
                                         bulk_reason = st.text_input(
                                             "reason_label",
-                                            placeholder="Reason for deductions (optional)",
-                                            key="inline_deduction_reason",
+                                            placeholder="Reason for applying amount (optional)",
+                                            key="inline_apply_reason",
                                             label_visibility="collapsed",
                                         )
                                     with col_submit:
-                                        submit_deductions = st.form_submit_button(
-                                            "Apply All Deductions",
+                                        submit_apply = st.form_submit_button(
+                                            "Apply Amounts",
                                             type="primary",
                                             use_container_width=True,
                                         )
 
-                                    # Store deduction inputs from edited dataframe
-                                    deduction_inputs = {}
-                                    if submit_deductions:
+                                    # Store apply inputs from edited dataframe
+                                    apply_inputs = {}
+                                    if submit_apply:
                                         for idx, row in edited_df.iterrows():
                                             po_num = row["PO Number"]
-                                            deduct_amt = row.get("Deduct", 0.0)
-                                            if deduct_amt > 0:
-                                                deduction_inputs[po_num] = deduct_amt
+                                            apply_amt = row.get("Apply", 0.0)
+                                            if apply_amt > 0:
+                                                apply_inputs[po_num] = apply_amt
 
-                                    # Process deductions when form is submitted
-                                    if submit_deductions:
+                                    # Process applications when form is submitted
+                                    if submit_apply:
                                         # Get CC Batch ID
                                         cc_batch_id = None
 
@@ -5109,16 +5086,16 @@ def render_reco() -> None:
                                                 "Cannot determine CC Batch ID. Please ensure you have selected a CC batch."
                                             )
                                         else:
-                                            # Process all deductions
+                                            # Process all applications
                                             success_count = 0
                                             error_count = 0
-                                            total_deducted = 0.0
+                                            total_applied = 0.0
                                             errors = []
 
                                             for (
                                                 po_num,
                                                 amount,
-                                            ) in deduction_inputs.items():
+                                            ) in apply_inputs.items():
                                                 if amount > 0:
                                                     try:
                                                         po_row = po_table[
@@ -5126,7 +5103,7 @@ def render_reco() -> None:
                                                             == po_num
                                                         ].iloc[0]
                                                         original = po_row[
-                                                            "Original_PO_Amount"
+                                                            "Original_Amount"
                                                         ]
 
                                                         save_po_deduction(
@@ -5138,7 +5115,7 @@ def render_reco() -> None:
                                                         )
 
                                                         success_count += 1
-                                                        total_deducted += amount
+                                                        total_applied += amount
                                                     except ValueError as ve:
                                                         error_count += 1
                                                         errors.append(
@@ -5152,14 +5129,14 @@ def render_reco() -> None:
 
                                             if success_count > 0:
                                                 st.success(
-                                                    f"✅ Successfully applied {success_count} deduction(s)!\n\n"
-                                                    f"Total Amount Deducted: ${total_deducted:,.2f}\n"
+                                                    f"✅ Successfully applied {success_count} amount(s)!\n\n"
+                                                    f"Total Amount Applied: ${total_applied:,.2f}\n"
                                                     f"CC Batch ID: {cc_batch_id}"
                                                 )
 
                                             if error_count > 0:
                                                 st.error(
-                                                    f"❌ {error_count} deduction(s) failed:"
+                                                    f"❌ {error_count} application(s) failed:"
                                                 )
                                                 for error in errors:
                                                     st.error(f"  • {error}")
@@ -5177,9 +5154,9 @@ def render_reco() -> None:
                                                 else:
                                                     st.experimental_rerun()
 
-                                # Add deduction history
+                                # Add application history
                                 st.markdown("---")
-                                st.markdown("### 📜 Deduction History")
+                                st.markdown("### 📜 Application History")
 
                                 deductions_df = load_po_deductions()
                                 if not deductions_df.empty:
@@ -5213,17 +5190,21 @@ def render_reco() -> None:
                                     ].sort_values("Timestamp", ascending=False)
 
                                     if not vendor_deductions.empty:
-                                        display_deductions = vendor_deductions.copy()
-                                        display_deductions["Deduction_Amount"] = (
-                                            display_deductions["Deduction_Amount"].map(
-                                                lambda x: f"${x:,.2f}"
-                                            )
+                                        display_applications = vendor_deductions.copy()
+                                        # Rename column for display
+                                        display_applications["Applied_Amount"] = (
+                                            display_applications[
+                                                "Deduction_Amount"
+                                            ].map(lambda x: f"${x:,.2f}")
                                         )
 
                                         # Parse CC Batch to show date
-                                        if "CC_Batch_ID" in display_deductions.columns:
-                                            display_deductions["CC_Date"] = (
-                                                display_deductions["CC_Batch_ID"]
+                                        if (
+                                            "CC_Batch_ID"
+                                            in display_applications.columns
+                                        ):
+                                            display_applications["CC_Date"] = (
+                                                display_applications["CC_Batch_ID"]
                                                 .str.extract(r"(\d{8})")[0]
                                                 .apply(
                                                     lambda x: f"{x[0:2]}/{x[2:4]}/{x[4:]}"
@@ -5234,10 +5215,10 @@ def render_reco() -> None:
 
                                         display_cols = [
                                             "PO_Number",
-                                            "Deduction_Amount",
+                                            "Applied_Amount",
                                             "CC_Batch_ID",
                                         ]
-                                        if "CC_Date" in display_deductions.columns:
+                                        if "CC_Date" in display_applications.columns:
                                             display_cols.append("CC_Date")
                                         display_cols.extend(["Reason", "Timestamp"])
 
@@ -5245,20 +5226,20 @@ def render_reco() -> None:
                                         display_cols = [
                                             col
                                             for col in display_cols
-                                            if col in display_deductions.columns
+                                            if col in display_applications.columns
                                         ]
 
                                         st.dataframe(
-                                            display_deductions[display_cols],
+                                            display_applications[display_cols],
                                             hide_index=True,
                                             use_container_width=True,
                                         )
                                     else:
                                         st.info(
-                                            f"No deductions for vendor {selected_vendor_prefix}"
+                                            f"No applications for vendor {selected_vendor_prefix}"
                                         )
                                 else:
-                                    st.info("No deductions have been made yet")
+                                    st.info("No applications have been made yet")
                             else:
                                 st.info(
                                     f"No PO records matched for vendor {selected_vendor_prefix}"
