@@ -2885,9 +2885,13 @@ def render_reco() -> None:
                     )
                     if valid_mask.any():
                         po_merge_data = po_merge.loc[valid_mask].copy()
-                        # Keep all rows including duplicates to count all line items
+                        # Deduplicate by PO_Number to avoid counting the same PO multiple times
+                        # when it matches multiple CC transaction windows
+                        po_merge_unique = po_merge_data.drop_duplicates(
+                            subset=["PO_Number"], keep="first"
+                        )
                         po_summary = (
-                            po_merge_data.groupby(results_group_cols, dropna=False)
+                            po_merge_unique.groupby(results_group_cols, dropna=False)
                             .agg(
                                 Comparison_Amount=("Comparison_Amount", "sum"),
                                 Base_PO_Amount=(
@@ -2898,15 +2902,15 @@ def render_reco() -> None:
                                     "Original_PO_Amount",
                                     "sum",
                                 )
-                                if "Original_PO_Amount" in po_merge_data.columns
+                                if "Original_PO_Amount" in po_merge_unique.columns
                                 else (
                                     "PO_Amount",
                                     "sum",
                                 ),  # Original PO amount for CC charge calculation (before deductions)
                                 PO_Transaction_Count=(
                                     "PO_Number",
-                                    "count",
-                                ),  # Count all rows
+                                    "nunique",
+                                ),  # Count unique POs only
                             )
                             .reset_index()
                         )
@@ -4812,14 +4816,18 @@ def render_reco() -> None:
                                     vendor_po_data is not None
                                     and not vendor_po_data.empty
                                 ):
-                                    po_count = len(vendor_po_data)
+                                    # Deduplicate by PO_Number to get accurate count
+                                    vendor_po_unique = vendor_po_data.drop_duplicates(
+                                        subset=["PO_Number"], keep="first"
+                                    )
+                                    po_count = len(vendor_po_unique)
                                     # Use Comparison_Amount (CC_Charge_Amount) for total
-                                    if "Comparison_Amount" in vendor_po_data.columns:
-                                        po_total = vendor_po_data[
+                                    if "Comparison_Amount" in vendor_po_unique.columns:
+                                        po_total = vendor_po_unique[
                                             "Comparison_Amount"
                                         ].sum()
                                     else:
-                                        po_total = vendor_po_data["PO_Amount"].sum()
+                                        po_total = vendor_po_unique["PO_Amount"].sum()
                                     po_total_col1, po_total_col2 = st.columns(2)
                                     with po_total_col1:
                                         st.metric("PO Count", po_count)
