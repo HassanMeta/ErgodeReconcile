@@ -798,7 +798,14 @@ def render_masters() -> None:
     ]
     category_options = ["ONLY FBA", "ONLY FBM", "COMMON", "NOT AVBL"]
     dept_options = ["FBA", "FBM"]
-    payment_term_options = ["pre_payment", "Net 10", "Net 15", "Net 30"]
+    # Payment terms as numeric values (days) - used in date window calculations
+    payment_term_options = [0, 10, 15, 30]
+    payment_term_labels = {
+        0: "Pre-payment (0 days)",
+        10: "Net 10",
+        15: "Net 15",
+        30: "Net 30",
+    }
 
     with tab1:
         try:
@@ -824,10 +831,7 @@ def render_masters() -> None:
         if error_message:
             st.error(error_message)
 
-        st.markdown("---")
-        st.markdown("### Legacy Forms (for reference)")
-
-        with st.expander("Add Vendor Master Entry (Legacy)", expanded=False):
+        with st.expander("Add Vendor Master Entry", expanded=False):
             modal_error = st.session_state.pop("vendor_modal_error", None)
             if modal_error:
                 st.error(modal_error)
@@ -854,9 +858,19 @@ def render_masters() -> None:
                     help="Select the department (FBA or FBM).",
                 )
                 payment_choice = st.selectbox(
-                    "Payment Terms",
+                    "Payment Terms (Days)",
                     options=payment_term_options,
-                    help="Select a supported payment term.",
+                    format_func=lambda x: payment_term_labels.get(x, str(x)),
+                    help="Select payment terms in days (0 = pre-payment).",
+                )
+                cc_fee_input = st.number_input(
+                    "CC Fee Rate",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.0,
+                    step=0.001,
+                    format="%.4f",
+                    help="Enter CC fee rate (e.g., 0.03 for 3%).",
                 )
                 submitted = st.form_submit_button("Save Vendor", type="primary")
 
@@ -880,7 +894,12 @@ def render_masters() -> None:
                     )
                     & (master_df["CATEGORY"].astype(str) == category_choice)
                     & (master_df["DEPT"].astype(str) == dept_choice)
-                    & (master_df["PAYMENT TERMS"].astype(str) == payment_choice)
+                    & (
+                        pd.to_numeric(
+                            master_df["PAYMENT TERMS"], errors="coerce"
+                        ).fillna(0)
+                        == payment_choice
+                    )
                 )
                 if prefix_value and duplicate_mask.any():
                     validation_errors.append(
@@ -899,6 +918,7 @@ def render_masters() -> None:
                             "CATEGORY": [category_choice],
                             "DEPT": [dept_choice],
                             "PAYMENT TERMS": [payment_choice],
+                            "CC FEE": [cc_fee_input],
                         }
                     )
                     updated_master = pd.concat(
@@ -1005,18 +1025,48 @@ def render_masters() -> None:
                                 help="Select the department (FBA or FBM).",
                                 key="edit_dept",
                             )
-                            current_payment = str(selected_row["PAYMENT TERMS"]).strip()
+                            # Convert payment terms to numeric for proper matching
+                            current_payment_numeric = pd.to_numeric(
+                                selected_row.get("PAYMENT TERMS", 0), errors="coerce"
+                            )
+                            current_payment_numeric = (
+                                int(current_payment_numeric)
+                                if pd.notna(current_payment_numeric)
+                                else 0
+                            )
                             payment_index = (
-                                payment_term_options.index(current_payment)
-                                if current_payment in payment_term_options
+                                payment_term_options.index(current_payment_numeric)
+                                if current_payment_numeric in payment_term_options
                                 else 0
                             )
                             edit_payment_choice = st.selectbox(
-                                "Payment Terms",
+                                "Payment Terms (Days)",
                                 options=payment_term_options,
                                 index=payment_index,
-                                help="Select a supported payment term.",
+                                format_func=lambda x: payment_term_labels.get(
+                                    x, str(x)
+                                ),
+                                help="Select payment terms in days (0 = pre-payment).",
                                 key="edit_payment",
+                            )
+                            # CC Fee field
+                            current_cc_fee = pd.to_numeric(
+                                selected_row.get("CC FEE", 0), errors="coerce"
+                            )
+                            current_cc_fee = (
+                                float(current_cc_fee)
+                                if pd.notna(current_cc_fee)
+                                else 0.0
+                            )
+                            edit_cc_fee_input = st.number_input(
+                                "CC Fee Rate",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=current_cc_fee,
+                                step=0.001,
+                                format="%.4f",
+                                help="Enter CC fee rate (e.g., 0.03 for 3%).",
+                                key="edit_cc_fee",
                             )
                             edit_submitted = st.form_submit_button(
                                 "Update Vendor", type="primary"
@@ -1066,7 +1116,9 @@ def render_masters() -> None:
                                         == edit_dept_choice
                                     )
                                     & (
-                                        other_rows["PAYMENT TERMS"].astype(str)
+                                        pd.to_numeric(
+                                            other_rows["PAYMENT TERMS"], errors="coerce"
+                                        ).fillna(0)
                                         == edit_payment_choice
                                     )
                                 )
@@ -1093,6 +1145,9 @@ def render_masters() -> None:
                                 master_df.loc[selected_idx, "DEPT"] = edit_dept_choice
                                 master_df.loc[selected_idx, "PAYMENT TERMS"] = (
                                     edit_payment_choice
+                                )
+                                master_df.loc[selected_idx, "CC FEE"] = (
+                                    edit_cc_fee_input
                                 )
 
                                 try:
