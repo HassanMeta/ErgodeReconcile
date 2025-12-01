@@ -5128,11 +5128,33 @@ def render_reco() -> None:
 
                                 deductions_df = load_po_deductions()
                                 if not deductions_df.empty:
-                                    # Filter for current vendor
-                                    vendor_deductions = deductions_df[
-                                        deductions_df["PO_Number"].str.startswith(
-                                            selected_vendor_prefix, na=False
+                                    # Get PO numbers that belong to this vendor from PO data
+                                    try:
+                                        po_data = read_parquet_with_fallback(
+                                            Path("records/po")
                                         )
+                                        vendor_po_numbers = (
+                                            po_data[
+                                                po_data["Vendor_Prefix"]
+                                                .astype(str)
+                                                .str.strip()
+                                                .str.upper()
+                                                == selected_vendor_prefix.upper()
+                                            ]["PO_Number"]
+                                            .astype(str)
+                                            .str.strip()
+                                            .unique()
+                                            .tolist()
+                                        )
+                                    except Exception:
+                                        vendor_po_numbers = []
+
+                                    # Filter deductions by PO numbers belonging to this vendor
+                                    vendor_deductions = deductions_df[
+                                        deductions_df["PO_Number"]
+                                        .astype(str)
+                                        .str.strip()
+                                        .isin(vendor_po_numbers)
                                     ].sort_values("Timestamp", ascending=False)
 
                                     if not vendor_deductions.empty:
