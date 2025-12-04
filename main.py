@@ -1410,6 +1410,11 @@ def render_masters() -> None:
                                         if new_dept != original_dept:
                                             # Update the mapping
                                             save_dept_mappings([ref_id], new_dept)
+                                            # Clear reconciliation cache to force refresh with updated mappings
+                                            st.session_state.pop("reco_df", None)
+                                            st.session_state.pop(
+                                                "current_reco_batch", None
+                                            )
                                             changes_made = True
 
                             if changes_made:
@@ -3856,8 +3861,10 @@ def render_reco() -> None:
                             )
 
                         if auto_processed_descriptions:
-                            # Update session state with modified reco_df
-                            st.session_state["reco_df"] = reco_df
+                            # Clear reconciliation cache to force refresh with updated mappings
+                            # This ensures run_reconciliation is called with latest mappings from file
+                            st.session_state.pop("reco_df", None)
+                            st.session_state.pop("current_reco_batch", None)
                             summary_descs = ", ".join(auto_processed_descriptions[:5])
                             if len(auto_processed_descriptions) > 5:
                                 summary_descs += ", ..."
@@ -3970,6 +3977,9 @@ def render_reco() -> None:
                                 if ref_ids:
                                     # Save mapping for these specific CC_Reference_IDs (batch-specific)
                                     save_dept_mappings(ref_ids, row["Dept"])
+                                    # Clear reconciliation cache to force refresh with updated mappings
+                                    st.session_state.pop("reco_df", None)
+                                    st.session_state.pop("current_reco_batch", None)
 
                 # Update session state
                 st.session_state["common_dept_choices"] = {
@@ -4336,8 +4346,10 @@ def render_reco() -> None:
                                 )
 
                             if processed_descriptions:
-                                # Update session state with modified reco_df
-                                st.session_state["reco_df"] = reco_df
+                                # Clear reconciliation cache to force refresh with updated mappings
+                                # This ensures run_reconciliation is called with latest mappings from file
+                                st.session_state.pop("reco_df", None)
+                                st.session_state.pop("current_reco_batch", None)
                                 summary_descs = ", ".join(processed_descriptions[:5])
                                 if len(processed_descriptions) > 5:
                                     summary_descs += ", ..."
@@ -4710,8 +4722,10 @@ def render_reco() -> None:
                                 )
 
                             if updates_applied:
-                                # Update session state with modified reco_df
-                                st.session_state["reco_df"] = reco_df
+                                # Clear reconciliation cache to force refresh with updated mappings
+                                # This ensures run_reconciliation is called with latest mappings from file
+                                st.session_state.pop("reco_df", None)
+                                st.session_state.pop("current_reco_batch", None)
                                 st.session_state["reco_success"] = (
                                     "Updated mappings for: "
                                     + ", ".join(updates_applied[:5])
