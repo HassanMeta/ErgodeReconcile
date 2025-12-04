@@ -122,10 +122,11 @@ def save_po_deduction(
 ) -> float:
     """
     Save a new PO application (amount applied to a CC batch).
+    Supports negative amounts to correct previous mistakes.
 
     Args:
         po_number: PO number to apply amount from
-        amount: Amount to apply
+        amount: Amount to apply (positive to add, negative to subtract)
         po_original_amount: Original PO amount (for validation)
         cc_batch_id: CC Batch ID this application is associated with
         reason: Optional reason for the application
@@ -138,25 +139,44 @@ def save_po_deduction(
     """
     deductions_path = Path("records/po_deductions")
 
-    # Validate amount
-    if amount <= 0:
-        raise ValueError("Apply amount must be greater than 0")
+    # Validate amount is not zero
+    if amount == 0:
+        raise ValueError("Apply amount cannot be zero")
 
     # Get current balance (Original - Already Applied)
     total_applied, available_balance = get_po_available_balance(
         po_number, po_original_amount
     )
 
-    # Check if sufficient balance
-    if amount > available_balance:
-        raise ValueError(
-            f"Insufficient balance. Available: ${available_balance:.2f}, "
-            f"Requested: ${amount:.2f}"
-        )
+    # Handle negative amounts (corrections)
+    if amount < 0:
+        # Cannot apply negative if nothing has been applied
+        if total_applied <= 0:
+            raise ValueError(
+                f"Cannot apply negative amount. No amount has been applied yet. "
+                f"Current applied: ${total_applied:.2f}"
+            )
 
-    # Check if PO is already fully applied
-    if available_balance <= 0:
-        raise ValueError(f"PO {po_number} is fully applied. No more amount available.")
+        # Negative amount cannot exceed total applied (can't go below 0)
+        if abs(amount) > total_applied:
+            raise ValueError(
+                f"Cannot reduce applied amount by ${abs(amount):.2f}. "
+                f"Only ${total_applied:.2f} has been applied. "
+                f"Maximum reduction allowed: ${total_applied:.2f}"
+            )
+    else:
+        # Positive amount: check if sufficient balance
+        if amount > available_balance:
+            raise ValueError(
+                f"Insufficient balance. Available: ${available_balance:.2f}, "
+                f"Requested: ${amount:.2f}"
+            )
+
+        # Check if PO is already fully applied
+        if available_balance <= 0:
+            raise ValueError(
+                f"PO {po_number} is fully applied. No more amount available."
+            )
 
     # Create new application record (using same table structure for backward compatibility)
     existing = load_po_deductions()
@@ -5020,8 +5040,7 @@ def render_reco() -> None:
                                             ),
                                             "Apply": st.column_config.NumberColumn(
                                                 "Apply",
-                                                help="Enter amount to apply from this PO to current CC batch (cannot exceed Balance)",
-                                                min_value=0.0,
+                                                help="Enter positive amount to apply, or negative amount to correct previous applications (e.g., -810 to reduce by $810). Negative amount cannot exceed Applied Amount.",
                                                 format="$%.2f",
                                                 width="small",
                                             ),
@@ -5066,7 +5085,8 @@ def render_reco() -> None:
                                         for idx, row in edited_df.iterrows():
                                             po_num = row["PO Number"]
                                             apply_amt = row.get("Apply", 0.0)
-                                            if apply_amt > 0:
+                                            # Allow both positive and negative amounts (but not zero)
+                                            if apply_amt != 0:
                                                 apply_inputs[po_num] = apply_amt
 
                                     # Process applications when form is submitted
@@ -5124,43 +5144,75 @@ def render_reco() -> None:
                                                 po_num,
                                                 amount,
                                             ) in apply_inputs.items():
-                                                if amount > 0:
-                                                    try:
-                                                        po_row = po_table[
-                                                            po_table["PO_Number"]
-                                                            == po_num
-                                                        ].iloc[0]
-                                                        original = po_row[
-                                                            "Original_Amount"
-                                                        ]
+                                                try:
+                                                    po_row = po_table[
+                                                        po_table["PO_Number"] == po_num
+                                                    ].iloc[0]
+                                                    original = po_row["Original_Amount"]
 
-                                                        save_po_deduction(
-                                                            po_num,
-                                                            amount,
-                                                            original,
-                                                            cc_batch_id,
-                                                            bulk_reason,
+                                                    # Additional validation for negative amounts
+                                                    if amount < 0:
+                                                        current_applied = po_row.get(
+                                                            "Applied_Amount", 0.0
                                                         )
+                                                        if current_applied <= 0:
+                                                            raise ValueError(
+                                                                f"Cannot apply negative amount ${amount:.2f}. "
+                                                                f"No amount has been applied yet (Applied: ${current_applied:.2f})"
+                                                            )
+                                                        if (
+                                                            abs(amount)
+                                                            > current_applied
+                                                        ):
+                                                            raise ValueError(
+                                                                f"Cannot reduce by ${abs(amount):.2f}. "
+                                                                f"Only ${current_applied:.2f} has been applied. "
+                                                                f"Maximum reduction: ${current_applied:.2f}"
+                                                            )
 
-                                                        success_count += 1
-                                                        total_applied += amount
-                                                    except ValueError as ve:
-                                                        error_count += 1
-                                                        errors.append(
-                                                            f"PO {po_num}: {str(ve)}"
-                                                        )
-                                                    except Exception as exc:
-                                                        error_count += 1
-                                                        errors.append(
-                                                            f"PO {po_num}: {str(exc)}"
-                                                        )
+                                                    save_po_deduction(
+                                                        po_num,
+                                                        amount,
+                                                        original,
+                                                        cc_batch_id,
+                                                        bulk_reason,
+                                                    )
+
+                                                    success_count += 1
+                                                    # For display purposes, add the amount (negative amounts will subtract)
+                                                    total_applied += amount
+                                                except ValueError as ve:
+                                                    error_count += 1
+                                                    errors.append(
+                                                        f"PO {po_num}: {str(ve)}"
+                                                    )
+                                                except Exception as exc:
+                                                    error_count += 1
+                                                    errors.append(
+                                                        f"PO {po_num}: {str(exc)}"
+                                                    )
 
                                             if success_count > 0:
-                                                st.success(
-                                                    f"✅ Successfully applied {success_count} amount(s)!\n\n"
-                                                    f"Total Amount Applied: ${total_applied:,.2f}\n"
-                                                    f"CC Batch ID: {cc_batch_id}"
-                                                )
+                                                # Determine message based on whether amounts are positive or negative
+                                                if total_applied < 0:
+                                                    message = (
+                                                        f"✅ Successfully corrected {success_count} amount(s)!\n\n"
+                                                        f"Total Amount Reduced: ${abs(total_applied):,.2f}\n"
+                                                        f"CC Batch ID: {cc_batch_id}"
+                                                    )
+                                                elif total_applied > 0:
+                                                    message = (
+                                                        f"✅ Successfully applied {success_count} amount(s)!\n\n"
+                                                        f"Total Amount Applied: ${total_applied:,.2f}\n"
+                                                        f"CC Batch ID: {cc_batch_id}"
+                                                    )
+                                                else:
+                                                    message = (
+                                                        f"✅ Successfully processed {success_count} amount(s)!\n\n"
+                                                        f"Net Change: $0.00\n"
+                                                        f"CC Batch ID: {cc_batch_id}"
+                                                    )
+                                                st.success(message)
 
                                             if error_count > 0:
                                                 st.error(
