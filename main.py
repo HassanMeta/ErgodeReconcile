@@ -1671,6 +1671,429 @@ def run_reconciliation(batch_df: pd.DataFrame) -> pd.DataFrame:
     return reco_df
 
 
+def build_results_df_from_batch(
+    batch_df: pd.DataFrame, grace_days: int = 5
+) -> pd.DataFrame:
+    """
+    Build results_df from a batch of CC transactions.
+    This function replicates the logic from render_reco() to build the summary results.
+
+    Args:
+        batch_df: DataFrame with CC transactions from a batch
+        grace_days: Number of grace days for PO matching window
+
+    Returns:
+        DataFrame with reconciliation results summary
+    """
+    # Run initial reconciliation
+    reco_df = run_reconciliation(batch_df)
+
+    if reco_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "CC_Txn_Date",
+                "Vendor_Prefix",
+                "Dept",
+                "Payment_Terms",
+                "Total_CC_Amount",
+                "CC_Transaction_Count",
+                "Total_PO_Amount",
+                "PO_Transaction_Count",
+                "Total_Deductions",
+                "CC_Fee",
+                "Total_CC_Charge",
+                "Flag",
+                "Vendor_Name",
+                "Base_PO_Amount",
+                "Original_PO_Amount_Sum",
+            ]
+        )
+
+    # Categorize transactions
+    display_df = reco_df.drop(columns=["Import_Batch_ID"], errors="ignore")
+    category_series = display_df["Category"].astype(str).str.upper()
+    mapped_df = display_df[~category_series.isin(["UNMAPPED", "COMMON", "NOT AVBL"])]
+
+    results_group_cols = ["CC_Txn_Date", "Vendor_Prefix", "Dept", "Payment_Terms"]
+
+    if mapped_df.empty:
+        results_df = pd.DataFrame(
+            columns=results_group_cols
+            + [
+                "Total_CC_Amount",
+                "CC_Transaction_Count",
+                "Total_PO_Amount",
+                "PO_Transaction_Count",
+                "Total_Deductions",
+                "CC_Fee",
+                "Total_CC_Charge",
+                "Flag",
+                "Vendor_Name",
+                "PO_Number",
+                "CC_Reference_ID",
+            ]
+        )
+    else:
+        results_base = mapped_df.assign(
+            CC_Amt=pd.to_numeric(mapped_df["CC_Amt"], errors="coerce")
+        ).fillna(
+            {
+                "CC_Txn_Date": "<missing date>",
+                "Vendor_Prefix": "<missing prefix>",
+                "Dept": "<missing dept>",
+                "Payment_Terms": "<missing payment terms>",
+            }
+        )
+        results_base["CC_Txn_Date_dt"] = pd.to_datetime(
+            results_base["CC_Txn_Date"], errors="coerce"
+        )
+        results_base["Payment_Terms_Numeric"] = pd.to_numeric(
+            results_base["Payment_Terms"], errors="coerce"
+        ).fillna(0)
+        results_base["Payment_Terms"] = results_base["Payment_Terms_Numeric"]
+        results_base["Window_Start"] = (
+            results_base["CC_Txn_Date_dt"]
+            - pd.to_timedelta(results_base["Payment_Terms_Numeric"], unit="D")
+            - pd.Timedelta(days=grace_days)
+        )
+        results_base["Window_End"] = results_base["CC_Txn_Date_dt"].where(
+            results_base["Payment_Terms_Numeric"] > 0,
+            results_base["CC_Txn_Date_dt"] + pd.Timedelta(days=grace_days),
+        )
+        results_base_unique = results_base.drop_duplicates(
+            subset=["CC_Reference_ID"], keep="first"
+        )
+        results_df = (
+            results_base_unique.groupby(results_group_cols)
+            .agg(
+                Total_CC_Amount=("CC_Amt", "sum"),
+                Transaction_Count=("CC_Reference_ID", "nunique"),
+                CC_Reference_ID=(
+                    "CC_Reference_ID",
+                    lambda x: ", ".join(sorted(set(str(v) for v in x if pd.notna(v)))),
+                ),
+            )
+            .reset_index()
+        )
+        results_df["Total_CC_Amount"] = results_df["Total_CC_Amount"].fillna(0.0)
+        results_df["Transaction_Count"] = (
+            results_df["Transaction_Count"].fillna(0).astype(int)
+        )
+        results_df["Vendor_Prefix"] = (
+            results_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
+        )
+
+        # Load PO data and match
+        po_path = Path("records/po")
+        po_df = pd.DataFrame()  # Initialize to avoid NameError if exception occurs
+        try:
+            po_df = read_parquet_with_fallback(po_path)
+            po_df["Vendor_Prefix"] = (
+                po_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
+            )
+            po_df["PO_Amount"] = pd.to_numeric(
+                po_df["PO_Amount"], errors="coerce"
+            ).fillna(0.0)
+            if "Total_PO_Amount" in po_df.columns:
+                po_df["Total_PO_Amount"] = pd.to_numeric(
+                    po_df["Total_PO_Amount"], errors="coerce"
+                ).fillna(0.0)
+                po_df["Comparison_Amount"] = po_df["Total_PO_Amount"].where(
+                    po_df["Total_PO_Amount"].notna(), po_df["PO_Amount"]
+                )
+            else:
+                po_df["Comparison_Amount"] = po_df["PO_Amount"]
+            po_df["PO_Date"] = pd.to_datetime(po_df["PO_Date"], errors="coerce")
+
+            # Apply PO deductions
+            deductions_df = load_po_deductions()
+            if not deductions_df.empty and "PO_Number" in po_df.columns:
+                po_applications = (
+                    deductions_df.groupby("PO_Number")
+                    .agg({"Deduction_Amount": "sum"})
+                    .reset_index()
+                )
+                po_applications.rename(
+                    columns={"Deduction_Amount": "Total_Deductions"}, inplace=True
+                )
+                po_df = po_df.merge(po_applications, on="PO_Number", how="left")
+                po_df["Total_Deductions"] = po_df["Total_Deductions"].fillna(0.0)
+                po_df["Original_PO_Amount"] = po_df["Comparison_Amount"].copy()
+                po_df["Applied_Amount"] = po_df["Total_Deductions"]
+                po_df["Balance"] = po_df["Original_PO_Amount"] - po_df["Applied_Amount"]
+                po_df["Comparison_Amount"] = po_df.apply(
+                    lambda row: row["Applied_Amount"]
+                    if row["Applied_Amount"] > 0
+                    else row["Original_PO_Amount"],
+                    axis=1,
+                )
+                po_df["Adjusted_PO_Amount"] = po_df["Comparison_Amount"]
+            else:
+                po_df["Total_Deductions"] = 0.0
+                po_df["Applied_Amount"] = 0.0
+                po_df["Original_PO_Amount"] = po_df["Comparison_Amount"].copy()
+                po_df["Balance"] = po_df["Original_PO_Amount"]
+                po_df["Comparison_Amount"] = po_df["Original_PO_Amount"]
+                po_df["Adjusted_PO_Amount"] = po_df["Comparison_Amount"]
+
+            # Match POs to CC transactions
+            window_cols = results_base[
+                results_group_cols
+                + ["Window_Start", "Window_End", "CC_Txn_Date_dt", "CC_Reference_ID"]
+            ].copy()
+            window_cols = window_cols.dropna(
+                subset=["CC_Txn_Date_dt", "Window_Start", "Window_End"]
+            )
+            po_summary = pd.DataFrame(
+                columns=results_group_cols + ["Comparison_Amount"]
+            )
+            if not window_cols.empty and not po_df.empty:
+                unique_vendors = window_cols["Vendor_Prefix"].dropna().unique()
+                po_df_filtered = po_df[
+                    po_df["Vendor_Prefix"].isin(unique_vendors)
+                ].copy()
+
+                if not po_df_filtered.empty:
+                    if "Dept" in po_df_filtered.columns:
+                        po_df_filtered["Dept"] = (
+                            po_df_filtered["Dept"].astype(str).str.strip().str.upper()
+                        )
+                    if "Dept" in window_cols.columns:
+                        window_cols["Dept"] = (
+                            window_cols["Dept"].astype(str).str.strip().str.upper()
+                        )
+
+                    merge_keys = ["Vendor_Prefix"]
+                    if (
+                        "Dept" in po_df_filtered.columns
+                        and "Dept" in window_cols.columns
+                    ):
+                        merge_keys.append("Dept")
+
+                    merge_columns = merge_keys + [
+                        "PO_Date",
+                        "Comparison_Amount",
+                        "PO_Number",
+                        "PO_Amount",
+                        "Original_PO_Amount",
+                        "Total_Deductions",
+                        "Adjusted_PO_Amount",
+                    ]
+                    merge_columns = [
+                        col for col in merge_columns if col in po_df_filtered.columns
+                    ]
+
+                    po_merge = window_cols.merge(
+                        po_df_filtered[merge_columns],
+                        on=merge_keys,
+                        how="left",
+                    )
+                    valid_mask = (
+                        po_merge["PO_Date"].notna()
+                        & po_merge["Window_Start"].notna()
+                        & po_merge["Window_End"].notna()
+                        & (po_merge["PO_Date"] >= po_merge["Window_Start"])
+                        & (po_merge["PO_Date"] <= po_merge["Window_End"])
+                    )
+                    if valid_mask.any():
+                        po_merge_data = po_merge.loc[valid_mask].copy()
+                        po_merge_unique = po_merge_data.drop_duplicates(
+                            subset=["PO_Number"], keep="first"
+                        )
+                        po_summary = (
+                            po_merge_unique.groupby(results_group_cols, dropna=False)
+                            .agg(
+                                Comparison_Amount=("Comparison_Amount", "sum"),
+                                Base_PO_Amount=("PO_Amount", "sum"),
+                                Original_PO_Amount_Sum=(
+                                    ("Original_PO_Amount", "sum")
+                                    if "Original_PO_Amount" in po_merge_unique.columns
+                                    else ("PO_Amount", "sum")
+                                ),
+                                PO_Transaction_Count=("PO_Number", "nunique"),
+                                PO_Number=(
+                                    "PO_Number",
+                                    lambda x: ", ".join(
+                                        sorted(set(str(v) for v in x if pd.notna(v)))
+                                    ),
+                                ),
+                            )
+                            .reset_index()
+                        )
+        except Exception:  # pylint: disable=broad-except
+            po_summary = pd.DataFrame(
+                columns=results_group_cols
+                + ["Comparison_Amount", "Base_PO_Amount", "PO_Transaction_Count"]
+            )
+
+        # Merge PO summary with CC results
+        if "Payment_Terms" in results_df.columns:
+            results_df["Payment_Terms"] = pd.to_numeric(
+                results_df["Payment_Terms"], errors="coerce"
+            ).fillna(0)
+        if "Payment_Terms" in po_summary.columns:
+            po_summary["Payment_Terms"] = pd.to_numeric(
+                po_summary["Payment_Terms"], errors="coerce"
+            ).fillna(0)
+
+        for col in results_group_cols:
+            if col in results_df.columns and col in po_summary.columns:
+                if col == "Payment_Terms":
+                    continue
+                else:
+                    results_df[col] = results_df[col].astype(str).str.strip()
+                    po_summary[col] = po_summary[col].astype(str).str.strip()
+
+        results_df = results_df.merge(
+            po_summary,
+            on=results_group_cols,
+            how="left",
+        ).rename(
+            columns={
+                "Comparison_Amount": "Total_PO_Amount",
+                "Base_PO_Amount": "Base_PO_Amount",
+                "Transaction_Count": "CC_Transaction_Count",
+            }
+        )
+        results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
+        results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
+        if "Original_PO_Amount_Sum" in results_df.columns:
+            results_df["Original_PO_Amount_Sum"] = results_df[
+                "Original_PO_Amount_Sum"
+            ].fillna(0.0)
+        else:
+            results_df["Original_PO_Amount_Sum"] = results_df["Base_PO_Amount"]
+        results_df["PO_Transaction_Count"] = (
+            results_df["PO_Transaction_Count"].fillna(0).astype(int)
+        )
+        # Fill PO_Number and CC_Reference_ID with empty string if not present
+        if "PO_Number" in results_df.columns:
+            results_df["PO_Number"] = results_df["PO_Number"].fillna("")
+        else:
+            results_df["PO_Number"] = ""
+        if "CC_Reference_ID" in results_df.columns:
+            results_df["CC_Reference_ID"] = results_df["CC_Reference_ID"].fillna("")
+        else:
+            results_df["CC_Reference_ID"] = ""
+
+        # Calculate Total_Deductions per vendor/dept
+        deductions_df = load_po_deductions()
+        if not deductions_df.empty and not po_df.empty and "PO_Number" in po_df.columns:
+            merge_cols = ["PO_Number", "Vendor_Prefix", "Dept"]
+            if "Payment_Terms" in po_df.columns:
+                merge_cols.append("Payment_Terms")
+
+            deduction_group_cols = ["Vendor_Prefix", "Dept"]
+            if "Payment_Terms" in po_df.columns:
+                deduction_group_cols.append("Payment_Terms")
+
+            deduction_merged = deductions_df.merge(
+                po_df[merge_cols],
+                on="PO_Number",
+                how="inner",
+            )
+
+            deduction_merged["Deduction_Amount"] = pd.to_numeric(
+                deduction_merged["Deduction_Amount"], errors="coerce"
+            ).fillna(0.0)
+
+            deduction_summary = (
+                deduction_merged.groupby(deduction_group_cols)
+                .agg({"Deduction_Amount": "sum"})
+                .reset_index()
+                .rename(columns={"Deduction_Amount": "Total_Deductions"})
+            )
+
+            results_df = results_df.merge(
+                deduction_summary, on=deduction_group_cols, how="left"
+            )
+            results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
+        else:
+            results_df["Total_Deductions"] = 0.0
+
+        results_df["Total_CC_Charge"] = 0.0
+        results_df["Flag"] = np.where(
+            results_df["Total_CC_Amount"] > results_df["Total_PO_Amount"],
+            "Red Flag",
+            "Green Flag",
+        )
+
+        # Add Vendor_Name and CC_Fee from master
+        master_path = Path("data/master")
+        try:
+            master_df = read_parquet_with_fallback(master_path)
+            if "PREFIX" in master_df.columns:
+                master_df["PREFIX"] = (
+                    master_df["PREFIX"].astype(str).str.strip().str.upper()
+                )
+                master_df["DEPT"] = (
+                    master_df["DEPT"].astype(str).str.strip().str.upper()
+                )
+
+                if "VENDOR_NAME" in master_df.columns:
+                    master_df_unique = master_df.drop_duplicates(
+                        subset=["PREFIX"], keep="first"
+                    )
+                    prefix_to_vendor_name = dict(
+                        zip(master_df_unique["PREFIX"], master_df_unique["VENDOR_NAME"])
+                    )
+                    results_df["Vendor_Name"] = results_df["Vendor_Prefix"].map(
+                        prefix_to_vendor_name
+                    )
+                    results_df["Vendor_Name"] = results_df["Vendor_Name"].fillna("")
+                else:
+                    results_df["Vendor_Name"] = ""
+
+                cc_fee_column = None
+                for col in master_df.columns:
+                    if "cc" in col.lower() and "fee" in col.lower():
+                        cc_fee_column = col
+                        break
+
+                if cc_fee_column:
+                    master_df["_lookup_key"] = (
+                        master_df["PREFIX"].astype(str)
+                        + "|"
+                        + master_df["DEPT"].astype(str)
+                    )
+                    cc_fee_lookup = dict(
+                        zip(
+                            master_df["_lookup_key"],
+                            pd.to_numeric(
+                                master_df[cc_fee_column], errors="coerce"
+                            ).fillna(0.0),
+                        )
+                    )
+                    results_df["_lookup_key"] = (
+                        results_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
+                        + "|"
+                        + results_df["Dept"].astype(str).str.strip().str.upper()
+                    )
+                    results_df["CC_Fee"] = (
+                        results_df["_lookup_key"].map(cc_fee_lookup).fillna(0.0)
+                    )
+                    results_df = results_df.drop(
+                        columns=["_lookup_key"], errors="ignore"
+                    )
+
+                    results_df["Total_CC_Charge"] = (
+                        results_df["Original_PO_Amount_Sum"] * results_df["CC_Fee"]
+                    )
+                else:
+                    results_df["CC_Fee"] = 0.0
+                    results_df["Total_CC_Charge"] = 0.0
+            else:
+                results_df["Vendor_Name"] = ""
+                results_df["CC_Fee"] = 0.0
+                results_df["Total_CC_Charge"] = 0.0
+        except Exception:  # pylint: disable=broad-except
+            results_df["Vendor_Name"] = ""
+            results_df["CC_Fee"] = 0.0
+            results_df["Total_CC_Charge"] = 0.0
+
+    return results_df
+
+
 def render_po_data() -> None:
     st.markdown(
         '<div class="main-header">Purchase Order Management</div>',
@@ -2639,6 +3062,215 @@ def render_cc_data() -> None:
         st.experimental_rerun()
 
 
+def render_download_reco() -> None:
+    """Render the Download Reco tab for downloading reconciliation data for multiple batches."""
+    st.markdown(
+        '<div class="main-header">Download Reconciliation Data</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "*Select multiple batches and download combined reconciliation results*"
+    )
+
+    # Load CC data to get available batches
+    cc_path = Path("records/cc")
+    try:
+        cc_df = read_parquet_with_fallback(cc_path)
+    except FileNotFoundError:
+        st.info("No credit card data found. Please upload CC transactions first.")
+        return
+    except Exception as exc:  # pylint: disable=broad-except
+        st.error(f"Unable to read CC data: {exc}")
+        return
+
+    if cc_df.empty:
+        st.info("No credit card data available. Please upload CC transactions first.")
+        return
+
+    # Get available batches
+    batch_series = cc_df["Import_Batch_ID"].fillna("Unknown")
+    batch_counts = batch_series.value_counts().sort_index()
+    batch_options = [
+        f"{batch_id} ({count} rows)"
+        for batch_id, count in batch_counts.items()
+        if batch_id != "Unknown"
+    ]
+
+    if not batch_options:
+        st.info("No batches available for reconciliation.")
+        return
+
+    # Extract batch IDs for multi-select
+    batch_ids = [batch_id for batch_id in batch_counts.index if batch_id != "Unknown"]
+
+    # Multi-select for batches
+    selected_batches = st.multiselect(
+        "Select CC Batches to Download",
+        options=batch_ids,
+        default=[],
+        help="Select one or more batches to include in the download",
+    )
+
+    if not selected_batches:
+        st.info("Please select at least one batch to download.")
+        return
+
+    # Grace days - default to 5, UI input commented for future feature
+    # TODO: Add UI input for Grace Days Buffer in future version
+    # grace_days = st.number_input(
+    #     "Grace Days Buffer",
+    #     min_value=0,
+    #     max_value=30,
+    #     value=5,
+    #     help="Number of grace days for PO matching window",
+    # )
+    grace_days = 5  # Default grace days for PO matching window
+
+    # Generate and Download buttons in same row
+    col_generate, col_download = st.columns(2)
+
+    with col_generate:
+        generate_clicked = st.button(
+            "Generate and Download CSV", type="primary", use_container_width=True
+        )
+
+    # Download button will be shown after generation
+    download_ready = st.session_state.get("download_reco_ready", False)
+    csv_data = st.session_state.get("download_reco_csv_data", None)
+    filename = st.session_state.get("download_reco_filename", None)
+
+    with col_download:
+        if download_ready and csv_data and filename:
+            st.download_button(
+                label="Download Combined Reconciliation Results",
+                data=csv_data,
+                file_name=filename,
+                mime="text/csv",
+                key="download_combined_reco",
+                use_container_width=True,
+                help=f"Download complete reconciliation results for {len(selected_batches)} batch(es) with all fields, flags, and calculations",
+            )
+        else:
+            st.button(
+                "Download Combined Reconciliation Results",
+                disabled=True,
+                use_container_width=True,
+                help="Generate CSV first to enable download",
+            )
+
+    if generate_clicked:
+        # Clear previous download state
+        st.session_state["download_reco_ready"] = False
+        st.session_state.pop("download_reco_csv_data", None)
+        st.session_state.pop("download_reco_filename", None)
+        all_results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        total_batches = len(selected_batches)
+        for idx, batch_id in enumerate(selected_batches):
+            status_text.text(f"Processing batch {idx + 1}/{total_batches}: {batch_id}")
+            progress_bar.progress((idx + 1) / total_batches)
+
+            try:
+                # Get batch data
+                batch_df = cc_df[
+                    cc_df["Import_Batch_ID"].astype(str) == batch_id
+                ].copy()
+
+                if batch_df.empty:
+                    st.warning(f"No transactions found for batch {batch_id}. Skipping.")
+                    continue
+
+                # Build results_df for this batch
+                results_df = build_results_df_from_batch(
+                    batch_df, grace_days=grace_days
+                )
+
+                if not results_df.empty:
+                    # Add batch ID column to identify which batch each row belongs to
+                    results_df["Batch_ID"] = batch_id
+                    all_results.append(results_df)
+
+            except Exception as exc:  # pylint: disable=broad-except
+                st.error(f"Error processing batch {batch_id}: {exc}")
+                continue
+
+        progress_bar.empty()
+        status_text.empty()
+
+        if not all_results:
+            st.error("No reconciliation data generated for selected batches.")
+            return
+
+        # Combine all results
+        combined_df = pd.concat(all_results, ignore_index=True)
+
+        # Select only the specified columns
+        required_columns = [
+            "CC_Txn_Date",
+            "Vendor_Prefix",
+            "Vendor_Name",
+            "Dept",
+            "Payment_Terms",
+            "Total_CC_Amount",
+            "CC_Transaction_Count",
+            "Total_PO_Amount",
+            "PO_Transaction_Count",
+            "Flag",
+            "PO_Number",
+            "CC_Reference_ID",
+        ]
+
+        # Fill missing columns with empty values
+        for col in required_columns:
+            if col not in combined_df.columns:
+                if col in ["PO_Number", "CC_Reference_ID", "Vendor_Name"]:
+                    combined_df[col] = ""
+                else:
+                    combined_df[col] = 0
+
+        # Select only the required columns in the specified order
+        combined_df = combined_df[required_columns]
+
+        # Convert dates to string for CSV
+        if "CC_Txn_Date" in combined_df.columns:
+            combined_df["CC_Txn_Date"] = combined_df["CC_Txn_Date"].astype(str)
+
+        # Generate CSV
+        csv_data = combined_df.to_csv(index=False)
+
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        sanitized_batches = "_".join(
+            [
+                re.sub(r'[<>:"/\\|?*]', "_", batch_id)
+                for batch_id in selected_batches[:3]
+            ]
+        )
+        if len(selected_batches) > 3:
+            sanitized_batches += f"_and_{len(selected_batches) - 3}_more"
+        filename = f"reconciliation_results_{sanitized_batches}_{timestamp}.csv"
+
+        # Store in session state for download button
+        st.session_state["download_reco_ready"] = True
+        st.session_state["download_reco_csv_data"] = csv_data
+        st.session_state["download_reco_filename"] = filename
+
+        # Show summary
+        st.success(
+            f"✅ Successfully processed {len(selected_batches)} batch(es) with "
+            f"{len(combined_df)} total reconciliation records. Click 'Download Combined Reconciliation Results' to download."
+        )
+
+        # Show preview (optional - user said not to display results, but a small summary might be helpful)
+        with st.expander("📊 Preview Summary (First 10 Rows)", expanded=False):
+            st.dataframe(combined_df.head(10), use_container_width=True)
+
+        # Rerun to show the download button
+        st.rerun()
+
+
 def render_reco() -> None:
     st.markdown(
         '<div class="main-header">Reconciliation Center</div>',
@@ -3198,6 +3830,9 @@ def render_reco() -> None:
             results_df["Vendor_Name"] = ""
             results_df["CC_Fee"] = 0.0
             results_df["Total_CC_Charge"] = 0.0
+
+    # Store results_df in session state for sidebar download
+    st.session_state["reco_results_df"] = results_df.copy()
 
     tab_labels = [
         f"Results ({len(results_df)})",
@@ -5423,6 +6058,7 @@ def main() -> None:
         ("PO Data", "PO Data"),
         ("CC Data", "CC Data"),
         ("Reco", "Reco"),
+        ("Download Reco", "Download Reco"),
     ]
 
     # Create navigation buttons
@@ -5453,6 +6089,8 @@ def main() -> None:
         render_po_data()
     elif page == "CC Data":
         render_cc_data()
+    elif page == "Download Reco":
+        render_download_reco()
     else:
         render_reco()
 

@@ -1,0 +1,1305 @@
+================================================================================
+    ERGODE CREDIT CARD RECONCILIATION SYSTEM - COMPLETE USER GUIDE
+================================================================================
+
+Version: 2.0
+Last Updated: 08-12-2025
+
+This comprehensive guide will help you use all features of the Ergode Credit
+Card Reconciliation System to match your credit card transactions with purchase
+orders efficiently and accurately.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+1. INTRODUCTION
+2. GETTING STARTED
+3. NAVIGATION OVERVIEW
+4. MASTERS MANAGEMENT
+5. PURCHASE ORDER (PO) DATA MANAGEMENT
+6. CREDIT CARD (CC) DATA MANAGEMENT
+7. RECONCILIATION CENTER
+8. DOWNLOAD RECONCILIATION DATA
+9. COMMON WORKFLOWS
+10. TROUBLESHOOTING & FAQ
+11. GLOSSARY OF TERMS
+
+================================================================================
+1. INTRODUCTION
+=================================`1qa1qzbhg-+
+===============================================
+
+WHAT IS THIS SYSTEM?
+
+The Ergode Credit Card Reconciliation System helps you:
+- Match credit card transactions with purchase orders
+- Automatically identify vendors from transaction descriptions
+- Track PO deductions and applications
+- Generate reconciliation reports
+- Export data for analysis in Excel
+
+KEY FEATURES:
+✓ Automatic vendor matching from transaction descriptions
+✓ PO deduction tracking with correction capability
+✓ Multi-batch reconciliation
+✓ Department assignment (FBA/FBM)
+✓ Payment terms management
+✓ CC fee calculations
+✓ Comprehensive reporting and export
+
+WHO SHOULD USE THIS GUIDE?
+
+This guide is for:
+- Accounts payable staff
+- Finance team members
+- Reconciliation specialists
+- Anyone responsible for matching credit card transactions to purchase orders
+
+================================================================================
+2. GETTING STARTED
+================================================================================
+
+SYSTEM REQUIREMENTS:
+
+- Modern web browser (Chrome, Firefox, Edge, Safari)
+- Access to the Ergode Reconciliation System
+- CSV or Excel files with your transaction data
+
+BEFORE YOU BEGIN:
+
+You'll need:
+1. Credit card statement files (CSV or Excel format)
+   - Transaction Date (MM/DD/YYYY format)
+   - Credit Card Number
+   - Transaction Description
+   - Transaction Amount
+   - Unique Reference ID for each transaction
+
+2. Purchase order files (CSV or Excel format)
+   - PO Date
+   - PO Number
+   - Vendor Code/Prefix
+   - PO Amount
+   - Department (FBA or FBM)
+
+3. Vendor master data (should be set up by administrator)
+   - Vendor Prefix/Code
+   - Vendor Name
+   - Category (ONLY FBA, ONLY FBM, COMMON, NOT AVBL)
+   - Department
+   - Payment Terms
+   - CC Fee Rate
+
+FIRST TIME SETUP:
+
+1. Open the application in your web browser
+2. The system will start on the "Masters" page
+3. Verify that vendor master data is set up (contact administrator if needed)
+4. You're ready to begin!
+
+================================================================================
+3. NAVIGATION OVERVIEW
+================================================================================
+
+The application has a sidebar on the left with navigation buttons:
+
+┌─────────────────────────┐
+│  Ergode CC Reco App     │
+│  ─────────────────────  │
+│                         │
+│  NAVIGATION             │
+│  ─────────────────────  │
+│  [Masters]              │ ← Active page (highlighted in red)
+│  [PO Data]              │
+│  [CC Data]              │
+│  [Reco]                 │
+│  [Download Reco]        │
+│                         │
+│  DOWNLOAD               │
+│  ─────────────────────  │
+│  (Download button       │
+│   appears here when     │
+│   reconciliation is     │
+│   available)            │
+└─────────────────────────┘
+
+NAVIGATION PAGES:
+
+1. MASTERS - Manage vendor master data and mappings
+2. PO DATA - Upload and manage purchase order records
+3. CC DATA - Upload and manage credit card transactions
+4. RECO - Run reconciliation and view results
+5. DOWNLOAD RECO - Download reconciliation data for multiple batches
+
+HOW TO NAVIGATE:
+
+- Click any button in the sidebar to switch pages
+- The active page is highlighted in red
+- You can switch between pages at any time
+- Your work is automatically saved
+
+================================================================================
+4. MASTERS MANAGEMENT
+================================================================================
+
+The Masters page is where you manage vendor information and description mappings.
+This is the foundation of the reconciliation system.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 1: VENDOR MASTER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab manages vendor master data - the core information about each vendor.
+
+VIEWING EXISTING VENDORS:
+
+1. The "Existing Vendor Master Entries" table shows all vendors
+2. You can see:
+   - PREFIX: Vendor code/identifier
+   - VENDOR_NAME: Full vendor name
+   - CATEGORY: Vendor category (ONLY FBA, ONLY FBM, COMMON, NOT AVBL)
+   - DEPT: Department (FBA or FBM)
+   - PAYMENT TERMS: Payment terms in days (0, 10, 15, or 30)
+   - CC FEE: Credit card fee rate (e.g., 0.03 for 3%)
+
+EDITING EXISTING VENDORS:
+
+1. Find the vendor in the table
+2. Click directly in the "PAYMENT TERMS" or "CC FEE" column
+3. Make your changes
+4. Changes are saved automatically when you click outside the cell
+
+Note: PREFIX, VENDOR_NAME, CATEGORY, and DEPT cannot be edited inline.
+Use the "Add Vendor Master Entry (Legacy)" form to add new vendors.
+
+ADDING A NEW VENDOR (Legacy Form):
+
+1. Click the "Add Vendor Master Entry (Legacy)" expander
+2. Fill in the form:
+   - Vendor Prefix: Enter vendor code (max 20 characters, stored in uppercase)
+   - Vendor Name: Enter full vendor name (max 100 characters)
+   - Category: Select from dropdown:
+     * ONLY FBA: Vendor only for FBA department
+     * ONLY FBM: Vendor only for FBM department
+     * COMMON: Vendor used by both departments (you'll assign dept later)
+     * NOT AVBL: Vendor not available for reconciliation
+   - Dept: Select FBA or FBM
+   - Payment Terms (Days): Select payment terms:
+     * 0 = Pre-payment (0 days)
+     * 10 = Net 10
+     * 15 = Net 15
+     * 30 = Net 30
+   - CC Fee Rate: Enter fee rate (e.g., 0.03 for 3%, 0.025 for 2.5%)
+3. Click "Save Vendor" button
+4. You'll see a success message if saved correctly
+
+IMPORTANT NOTES:
+
+- Vendor Prefix must be unique
+- If you try to add a duplicate prefix, you'll get an error
+- All prefixes are stored in uppercase automatically
+- CC Fee Rate is a decimal (0.03 = 3%, not 3)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 2: DESCRIPTION MAPPING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab maps transaction descriptions to vendor prefixes. This is how the
+system knows which vendor a credit card transaction belongs to.
+
+VIEWING EXISTING MAPPINGS:
+
+1. The table shows all description-to-vendor mappings
+2. Columns:
+   - DESCRIPTION: The transaction description text
+   - PREFIX: The vendor prefix this description maps to
+
+ADDING A NEW MAPPING:
+
+1. Click "Add New Description Mapping" expander
+2. Fill in:
+   - Description: Enter the exact transaction description (case-insensitive)
+   - Vendor Prefix: Select from dropdown of existing vendors
+3. Click "Save Mapping"
+4. The mapping is saved and will be used in future reconciliations
+
+IMPORTANT:
+
+- Descriptions are case-insensitive (AMAZON = amazon = Amazon)
+- Extra spaces are automatically normalized
+- If a description already exists, you'll get an error
+- The system matches descriptions exactly (after normalization)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 3: CC REFERENCE ID MAPPINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab allows you to map specific CC Reference IDs directly to departments.
+This is useful when you know a specific transaction should go to a specific
+department.
+
+VIEWING EXISTING MAPPINGS:
+
+1. The table shows all CC Reference ID to Department mappings
+2. Columns:
+   - CC_Reference_ID: The unique reference ID from the credit card transaction
+   - Dept: The department (FBA or FBM) this ID is mapped to
+
+ADDING A NEW MAPPING:
+
+1. Click "Add CC Reference ID Mapping" expander
+2. Fill in:
+   - CC Reference ID: Enter the exact reference ID
+   - Department: Select FBA or FBM
+3. Click "Save Mapping"
+4. The mapping is saved
+
+WHEN TO USE THIS:
+
+- When you have a specific transaction that should always go to a certain dept
+- When you want to override automatic department assignment
+- For recurring transactions with known department assignments
+
+================================================================================
+5. PURCHASE ORDER (PO) DATA MANAGEMENT
+================================================================================
+
+The PO Data page is where you upload and manage purchase order records.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VIEWING EXISTING PO DATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+At the top of the page, you'll see:
+- A table showing all existing PO records
+- Filters to help you find specific POs:
+  * Filter by Vendor Prefix
+  * Filter by Department
+  * Filter by CC Number
+  * Filter by Date Range
+
+The table shows:
+- PO_Date: Date of the purchase order
+- PO_Number: Unique PO number
+- Vendor_Prefix: Vendor code
+- PO_Amount: Base PO amount (before CC fee)
+- Dept: Department (FBA or FBM)
+- CC_Fee: Credit card fee rate
+- Total_PO_Amount: PO amount including CC fee
+- Import_Batch_ID: Which batch this PO was imported in
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+UPLOADING NEW PO DATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: PREPARE YOUR FILE
+
+Your CSV or Excel file should have these columns (names can vary):
+- PO Date (must be in MM/DD/YYYY format)
+- PO Number
+- Vendor Prefix/Code (must match vendor codes in Masters)
+- PO Amount
+- Department (FBA or FBM)
+- CC Number (optional)
+- CC Fee Rate (optional, decimal format like 0.03 for 3%)
+
+STEP 2: UPLOAD THE FILE
+
+1. Scroll down to "Upload CSV or Excel with PO records"
+2. Click "Browse Files" or drag and drop your file
+3. The system will show a preview of your file
+
+STEP 3: MAP YOUR COLUMNS
+
+The system will show you a form with required fields. For each field:
+1. Look at the dropdown next to the field name
+2. Select which column in your uploaded file contains that data
+3. Example: If your file has "Order Date", select it for "PO_Date"
+4. Example: If your file has "Vendor Code", select it for "Vendor_Prefix"
+
+Required fields to map:
+- PO_Date: The date of the purchase order
+- PO_Number: Unique PO identifier
+- Vendor_Prefix: Vendor code (must exist in Masters)
+- PO_Amount: Base amount of the PO
+- Dept: Department (FBA or FBM)
+- CC_Number: Credit card number (optional)
+- CC_Fee: CC fee rate (optional, will use vendor default if not provided)
+
+STEP 4: IMPORT THE DATA
+
+1. Review your column mappings
+2. Click "Import PO Data" button
+3. You'll see a success message with batch information
+4. Your data will appear in the table above
+
+IMPORTANT NOTES:
+
+- PO_Date must be in MM/DD/YYYY format (e.g., 12/25/2024)
+- Vendor_Prefix must match exactly with vendor codes in Masters
+- If a vendor doesn't exist, those rows will be skipped
+- The system creates a batch ID for each import
+- You can import multiple files - they'll be appended to existing data
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROLLING BACK PO BATCHES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If you made a mistake or need to remove imported data:
+
+1. Click "Manage Imports" expander
+2. You'll see a list of all import batches
+3. Select the batch(es) you want to remove
+4. Click "Rollback Selected Batches" button
+5. The selected batches will be removed from the system
+
+WARNING: This action cannot be undone. Make sure you want to delete the data.
+
+================================================================================
+6. CREDIT CARD (CC) DATA MANAGEMENT
+================================================================================
+
+The CC Data page is where you upload and manage credit card transactions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VIEWING EXISTING CC DATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+At the top of the page, you'll see:
+- A table showing all existing CC transactions
+- Filters to help you find specific transactions:
+  * Filter by CC Number
+  * Filter by Date Range
+
+The table shows:
+- CC_Txn_Date: Transaction date
+- CC_Number: Credit card number
+- CC_Description: Transaction description
+- CC_Amt: Transaction amount
+- CC_Reference_ID: Unique reference ID
+- Import_Batch_ID: Which batch this transaction was imported in
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+UPLOADING NEW CC DATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: PREPARE YOUR FILE
+
+Your CSV or Excel file should have these columns:
+- CC Date (must be in MM/DD/YYYY format)
+- CC Number
+- CC Description (transaction description)
+- CC Amount
+- CC Reference ID (unique ID for each transaction)
+
+STEP 2: UPLOAD THE FILE
+
+1. Scroll down to "Upload CSV or Excel with credit card records"
+2. Click "Browse Files" or drag and drop your file
+3. The system will show a preview of your file
+
+STEP 3: MAP YOUR COLUMNS
+
+For each required field, select which column in your file contains that data:
+
+Required fields:
+- CC_Txn_Date: Transaction date (MM/DD/YYYY format)
+- CC_Number: Credit card number
+- CC_Description: Transaction description
+- CC_Amt: Transaction amount (numeric)
+- CC_Reference_ID: Unique reference ID (must be unique, no duplicates)
+
+STEP 4: IMPORT THE DATA
+
+1. Review your column mappings
+2. Click "Append Records" button
+3. The system will:
+   - Validate the data
+   - Check for duplicate CC_Reference_IDs
+   - Create batch IDs (one per date in your file)
+   - Show success message with batch information
+
+IMPORTANT NOTES:
+
+- CC_Txn_Date must be in MM/DD/YYYY format (e.g., 12/25/2024)
+- CC_Reference_ID must be unique (no duplicates allowed)
+- If duplicates are found, those rows will be skipped
+- The system creates separate batches for each date
+- Batch ID format: CCBATCH-{last4digits}-{MMDDYYYY}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROLLING BACK CC BATCHES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If you need to remove imported transactions:
+
+1. Click "Manage Imports" expander
+2. Select the batch(es) you want to remove
+3. Click "Rollback Selected Batches" button
+4. The selected batches will be removed
+
+WARNING: This action cannot be undone.
+
+================================================================================
+7. RECONCILIATION CENTER
+================================================================================
+
+The Reco (Reconciliation) page is where you run reconciliations and view results.
+This is the heart of the system.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RUNNING A RECONCILIATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: SELECT A BATCH
+
+1. At the top of the page, you'll see a dropdown: "Select CC Batch to Reconcile"
+2. The dropdown shows all available CC batches with row counts
+   Example: "CCBATCH-1234-12252024 (25 rows)"
+3. Select the batch you want to reconcile
+
+STEP 2: AUTOMATIC RECONCILIATION
+
+Once you select a batch:
+- The system automatically runs the reconciliation
+- You'll see a spinner: "Running reconciliation for batch..."
+- The reconciliation process:
+  * Matches CC transactions to vendors using description mappings
+  * Finds matching purchase orders based on date windows
+  * Calculates totals, flags, and deductions
+  * Groups results by date, vendor, department, and payment terms
+
+STEP 3: VIEW RESULTS
+
+After reconciliation completes, you'll see multiple tabs with different views.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 1: RESULTS (Summary View)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This is the main summary view showing reconciliation results grouped by:
+- CC Transaction Date
+- Vendor Prefix
+- Department
+- Payment Terms
+
+WHAT YOU'LL SEE:
+
+Columns in the table:
+- CC_Txn_Date: Transaction date
+- Vendor_Prefix: Vendor code
+- Vendor_Name: Full vendor name
+- Dept: Department (FBA or FBM)
+- Payment_Terms: Payment terms in days
+- Total_CC_Amount: Sum of all CC transactions for this group
+- CC_Transaction_Count: Number of CC transactions
+- Total_PO_Amount: Sum of matching PO amounts (after deductions)
+- PO_Transaction_Count: Number of unique POs matched
+- Total_Deductions: Total amount deducted from POs
+- CC_Fee: CC fee rate
+- Total_CC_Charge: CC fee amount (Original_PO_Amount × CC_Fee)
+- Flag: Green Flag or Red Flag
+
+UNDERSTANDING FLAGS:
+
+🟢 GREEN FLAG:
+- CC Amount ≤ PO Amount
+- Everything looks good!
+- No action needed
+
+🔴 RED FLAG:
+- CC Amount > PO Amount
+- Needs investigation
+- Possible reasons:
+  * Missing purchase order
+  * Amount mismatch
+  * Need to apply PO deductions
+  * Data error
+
+FILTERING RESULTS:
+
+At the top of the Results tab, you can filter by:
+- Vendor Prefix: Select a specific vendor or "All"
+- Dept: Filter by FBA, FBM, or "All"
+- Flag: Filter by Green Flag, Red Flag, or "All"
+- Grace Days Buffer: Adjust the matching window (default: 5 days)
+
+ADJUSTING GRACE DAYS:
+
+Grace Days Buffer controls how far before/after the CC transaction date the
+system will look for matching purchase orders.
+
+- Default: 5 days
+- Increase if: You want to match POs further from the transaction date
+- Decrease if: You want stricter date matching
+
+How it works:
+- For payment terms > 0: Window = (CC Date - Payment Terms - Grace Days) to CC Date
+- For payment terms = 0: Window = (CC Date - Grace Days) to (CC Date + Grace Days)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 2: MAPPED (Successfully Matched)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab shows all CC transactions that were successfully matched to vendors
+and have a clear department assignment (ONLY FBA or ONLY FBM).
+
+WHAT YOU'LL SEE:
+
+- All transaction details
+- Vendor information
+- Department assignment
+- These transactions are complete - no action needed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 3: COMMON (Needs Department Assignment)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab shows transactions that matched a vendor but need you to assign a
+department. These are vendors marked as "COMMON" in the master data.
+
+AUTOMATIC PROCESSING:
+
+- Transactions under $100 are automatically assigned to FBM
+- You only need to review transactions $100 and above
+
+MANUAL PROCESSING:
+
+For transactions $100 and above:
+
+1. Review each transaction in the table
+2. For each transaction, you'll see:
+   - CC_Reference_ID
+   - CC_Description
+   - CC_Amt
+   - Vendor_Prefix
+   - Suggested Dept (if available)
+3. Select the Department:
+   - FBA: Fulfillment by Amazon
+   - FBM: Fulfillment by Merchant
+4. Check the "Apply" checkbox for transactions you want to process
+5. Click "Apply Selected" button at the bottom
+
+WHAT HAPPENS WHEN YOU APPLY:
+
+- The system saves your department assignment
+- Payment terms are updated based on vendor + department
+- The transaction moves to "Mapped" status
+- Future reconciliations will use this assignment automatically
+
+IMPORTANT:
+
+- Once assigned, this mapping is saved permanently
+- The same CC_Reference_ID will always use this department
+- You can see saved mappings in "CC Reference ID Mappings" tab in Masters
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 4: UNMAPPED (Could Not Match)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab shows transactions that could not be matched to any vendor.
+
+WHY TRANSACTIONS ARE UNMAPPED:
+
+- The transaction description doesn't match any description in the mappings
+- The vendor doesn't exist in the master data
+- The description format is different
+
+WHAT TO DO:
+
+1. Review the transaction descriptions
+2. If you know the vendor:
+   - Go to Masters → Description Mapping
+   - Add a new mapping for this description
+   - Re-run the reconciliation
+3. If the vendor doesn't exist:
+   - Contact your administrator to add the vendor to master data
+4. If the description is unique/one-time:
+   - You may need to manually handle this transaction
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 5: OTHERS (Not Available)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab shows transactions for vendors marked as "NOT AVBL" (Not Available)
+in the master data.
+
+- Usually no action needed
+- These are vendors excluded from reconciliation
+- Review if needed for your records
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TAB 6: ANALYSIS (Detailed Vendor Analysis)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This tab provides detailed analysis for a specific vendor, including PO
+details, CC transaction details, and the ability to apply PO deductions.
+
+SELECTING A VENDOR:
+
+1. At the top, you'll see a dropdown: "Select Vendor for Analysis"
+2. Select the vendor you want to analyze
+3. The page will show detailed information for that vendor
+
+SUBTAB 1: PO DETAILS
+
+This shows all purchase orders that matched for the selected vendor.
+
+WHAT YOU'LL SEE:
+
+- PO Date: Date of the purchase order
+- PO Number: Unique PO identifier
+- Original Amount: Original PO amount (never changes)
+- Total Deducted: Sum of all deductions applied to this PO
+- Available: Remaining balance available (Original - Deducted)
+- Adjusted Amount: Amount used for reconciliation (Applied if exists, else Original)
+- Comparison: Amount used for comparison with CC transactions
+- CC Date: Date of the CC transaction this PO matches
+- Window Start/End: Date window for matching
+
+APPLYING PO DEDUCTIONS:
+
+PO deductions allow you to apply amounts from purchase orders to credit card
+batches. This is useful when:
+- Part of a PO is used for a specific CC batch
+- You need to track PO usage across multiple reconciliations
+- You want to reduce the available PO amount
+
+HOW TO APPLY DEDUCTIONS:
+
+1. In the PO Details table, find the PO you want to deduct from
+2. In the "Deduct" column, enter the amount you want to apply
+   - Enter a positive number to apply an amount (e.g., 100.50)
+   - Enter a negative number to correct a previous application (e.g., -50.00)
+3. You can apply deductions to multiple POs at once
+4. Enter an optional reason in the "Reason" field (placeholder text)
+5. Click "Apply All Deductions" button
+
+VALIDATION RULES:
+
+For Positive Amounts:
+- Amount must be less than or equal to Available balance
+- PO must not be fully depleted
+- Amount cannot be zero
+
+For Negative Amounts (Corrections):
+- You can only use negative amounts if something has already been applied
+- Negative amount cannot exceed the total amount already applied
+- Example: If $100 was applied, you can correct up to -$100, but not -$150
+
+WHAT HAPPENS WHEN YOU APPLY:
+
+- The deduction is saved permanently
+- It affects all future reconciliations that include this PO
+- The deduction is cumulative (adds to previous deductions)
+- You'll see a success message showing:
+  * Total amount applied (or corrected)
+  * Number of POs affected
+  * CC Batch ID
+
+VIEWING DEDUCTION HISTORY:
+
+Below the PO Details table, you'll see "📜 Deduction History" showing:
+- All past deductions for this vendor
+- PO_Number
+- Deduction_Amount (positive or negative)
+- CC_Batch_ID
+- CC_Date (extracted from batch ID)
+- Reason
+- Timestamp
+
+SUBTAB 2: CC TRANSACTION DETAILS
+
+This shows all credit card transactions for the selected vendor.
+
+WHAT YOU'LL SEE:
+
+- CC_Reference_ID
+- CC_Txn_Date
+- CC_Description
+- CC_Amt
+- Vendor_Prefix
+- Category
+- Dept
+- Payment_Terms
+
+SUBTAB 3: GROUPED RESULTS
+
+This shows the reconciliation results grouped by:
+- CC_Txn_Date
+- Dept
+- Payment_Terms
+
+Use this to see how transactions are aggregated in the Results tab.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+UNDERSTANDING PO DEDUCTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PO deductions are amounts applied from purchase orders to credit card batches.
+They persist across all future reconciliations.
+
+KEY CONCEPTS:
+
+Original_PO_Amount:
+- The original amount of the PO (never changes)
+- This is what was originally entered
+
+Applied_Amount (Total_Deductions):
+- Sum of all deductions applied to this PO
+- Can be positive (additions) or negative (corrections)
+- Cumulative across all reconciliations
+
+Available Balance:
+- Original_PO_Amount - Applied_Amount
+- The amount still available for future deductions
+
+Adjusted_PO_Amount:
+- Used for reconciliation calculations
+- = Applied_Amount if > 0, else Original_PO_Amount
+
+EXAMPLE:
+
+PO Number: PO-12345
+Original Amount: $1,000.00
+
+Reconciliation 1:
+- Apply $300.00
+- Applied_Amount: $300.00
+- Available: $700.00
+
+Reconciliation 2:
+- Apply $200.00
+- Applied_Amount: $500.00 (cumulative)
+- Available: $500.00
+
+Reconciliation 3:
+- Made a mistake, need to correct
+- Apply -$100.00 (negative)
+- Applied_Amount: $400.00 (corrected)
+- Available: $600.00
+
+CORRECTING MISTAKES:
+
+If you applied the wrong amount:
+
+1. Go to Analysis tab for the vendor
+2. Find the PO in PO Details table
+3. Enter a negative amount in the "Deduct" column
+   - Example: If you applied $900 but meant $90, enter -$810
+4. Enter a reason (optional)
+5. Click "Apply All Deductions"
+6. The system will validate and apply the correction
+
+VALIDATION FOR CORRECTIONS:
+
+- You cannot apply a negative amount if nothing has been applied yet
+- Negative amount cannot exceed the total amount already applied
+- Example: If $100 applied, you can correct up to -$100, but not -$150
+
+================================================================================
+8. DOWNLOAD RECONCILIATION DATA
+================================================================================
+
+The "Download Reco" page allows you to download reconciliation data for
+multiple batches in a single CSV file.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO DOWNLOAD MULTIPLE BATCHES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: SELECT BATCHES
+
+1. Go to "Download Reco" page from the sidebar
+2. You'll see a multi-select dropdown: "Select CC Batches to Download"
+3. Select one or more batches you want to include
+4. You can select as many batches as needed
+
+STEP 2: SET GRACE DAYS (Optional)
+
+1. Adjust "Grace Days Buffer" if needed (default: 5 days)
+2. This affects how POs are matched to CC transactions
+3. Use the same value you used during reconciliation
+
+STEP 3: GENERATE AND DOWNLOAD
+
+1. Click "📥 Generate and Download CSV" button
+2. The system will:
+   - Process each selected batch
+   - Run reconciliation for each batch
+   - Combine all results into a single file
+   - Show progress bar and status updates
+3. When complete, a download button will appear
+4. Click "📥 Download Combined Reconciliation Results"
+5. The CSV file will download to your computer
+
+WHAT'S IN THE DOWNLOADED FILE:
+
+The CSV contains only these columns (optimized for Excel analysis):
+
+- CC_Txn_Date: Transaction date
+- Vendor_Prefix: Vendor code
+- Vendor_Name: Full vendor name
+- Dept: Department (FBA or FBM)
+- Payment_Terms: Payment terms in days
+- Total_CC_Amount: Sum of CC transactions
+- CC_Transaction_Count: Number of CC transactions
+- Total_PO_Amount: Sum of matching PO amounts
+- PO_Transaction_Count: Number of unique POs
+- Flag: Green Flag or Red Flag
+- PO_Number: Comma-separated list of PO numbers (for filtering/vlookup)
+- CC_Reference_ID: Comma-separated list of CC reference IDs (for filtering/vlookup)
+
+FILE NAMING:
+
+The file is named: reconciliation_results_{batches}_{timestamp}.csv
+
+Example: reconciliation_results_CCBATCH-1234-12252024_CCBATCH-5678-12262024_20241225_143022.csv
+
+USING THE DOWNLOADED DATA:
+
+- Open in Excel or Google Sheets
+- Use PO_Number and CC_Reference_ID columns for filtering
+- Use VLOOKUP or other functions to cross-reference
+- Analyze flags to identify issues
+- Create pivot tables for summary analysis
+
+IMPORTANT NOTES:
+
+- The download processes all selected batches fresh (re-runs reconciliation)
+- This ensures you get the latest data with current deductions
+- Processing may take time for large batches
+- You'll see progress updates during processing
+- If a batch fails, it will be skipped and you'll see an error message
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIDEBAR DOWNLOAD (Single Batch)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You can also download results for a single batch from the sidebar:
+
+1. Run a reconciliation on the "Reco" page
+2. After reconciliation completes, check the sidebar
+3. You'll see a "Download" section with a download button
+4. Click "📥 Download Reconciliation Results"
+5. The file will download with all reconciliation fields
+
+Note: This downloads the current batch only. Use "Download Reco" page for
+multiple batches.
+
+================================================================================
+9. COMMON WORKFLOWS
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW 1: FIRST TIME RECONCILIATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Verify vendor master data is set up (Masters → Vendor Master)
+2. Upload PO data (PO Data → Upload file → Map columns → Import)
+3. Upload CC data (CC Data → Upload file → Map columns → Append)
+4. Run reconciliation (Reco → Select batch → Automatic reconciliation)
+5. Review Results tab for Red Flags
+6. Process Common transactions (Common tab → Select dept → Apply)
+7. Review Unmapped transactions (add mappings if needed)
+8. Download results (Download Reco or sidebar download)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW 2: MONTHLY RECONCILIATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Upload new month's CC transactions (CC Data)
+2. Upload new month's PO data if needed (PO Data)
+3. Run reconciliation for new batch (Reco)
+4. Review Results for Red Flags
+5. Process Common transactions
+6. Apply PO deductions if needed (Analysis tab)
+7. Download combined results for reporting (Download Reco)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW 3: APPLYING PO DEDUCTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Run reconciliation (Reco → Select batch)
+2. Go to Analysis tab
+3. Select vendor from dropdown
+4. Review PO Details table
+5. Enter deduction amounts in "Deduct" column for relevant POs
+6. Enter optional reason
+7. Click "Apply All Deductions"
+8. Review success message and deduction history
+9. Results will update automatically
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW 4: CORRECTING A MISTAKE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Scenario: Applied $900 but meant $90
+
+1. Go to Reco → Analysis tab
+2. Select the vendor
+3. Find the PO in PO Details table
+4. Enter -810 in the "Deduct" column (negative amount)
+5. Enter reason: "Correction: meant $90, not $900"
+6. Click "Apply All Deductions"
+7. System validates and applies correction
+8. Available balance updates automatically
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW 5: ADDING NEW VENDOR MAPPINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Run reconciliation and see Unmapped transactions
+2. Identify the transaction description
+3. Go to Masters → Description Mapping
+4. Click "Add New Description Mapping"
+5. Enter the description (exact text from transaction)
+6. Select vendor prefix from dropdown
+7. Click "Save Mapping"
+8. Go back to Reco and re-run reconciliation
+9. Transaction should now be mapped
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW 6: DOWNLOADING MULTIPLE BATCHES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Go to Download Reco page
+2. Select multiple batches from multi-select dropdown
+3. Set Grace Days if needed (default: 5)
+4. Click "Generate and Download CSV"
+5. Wait for processing (progress bar shows status)
+6. Click download button when ready
+7. Open CSV in Excel for analysis
+
+================================================================================
+10. TROUBLESHOOTING & FAQ
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMMON ISSUES AND SOLUTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Q: My file upload failed. What should I do?
+
+A: Check the following:
+   - File format: Must be CSV or Excel (.csv, .xlsx, .xls)
+   - Date format: Must be MM/DD/YYYY (e.g., 12/25/2024)
+   - Required columns: Make sure all required fields are present
+   - Column mappings: Verify you mapped all required columns correctly
+   - Data types: Amounts must be numbers, dates must be valid dates
+
+Q: Transactions are showing as "Unmapped". Why?
+
+A: This means the transaction description doesn't match any mapping:
+   - Go to Masters → Description Mapping
+   - Check if a similar description exists (case doesn't matter)
+   - Add a new mapping if the vendor exists
+   - If vendor doesn't exist, contact administrator to add vendor
+
+Q: I'm getting "Red Flags" everywhere. What's wrong?
+
+A: Red Flags mean CC amount > PO amount. Common causes:
+   - Missing purchase orders (POs not uploaded yet)
+   - PO deductions need to be applied
+   - Date window too narrow (increase Grace Days)
+   - Vendor codes don't match between PO and Master data
+   - Check Analysis tab to see which POs matched
+
+Q: How do I fix a wrong PO deduction?
+
+A: Use negative amounts to correct:
+   1. Go to Reco → Analysis tab
+   2. Select the vendor
+   3. Find the PO in PO Details
+   4. Enter negative amount (e.g., -100 to reduce by $100)
+   5. Enter reason
+   6. Click "Apply All Deductions"
+   Note: You can only correct up to the amount already applied
+
+Q: Why can't I apply a negative deduction?
+
+A: Negative deductions have restrictions:
+   - You must have already applied some amount first
+   - Negative amount cannot exceed total amount already applied
+   - Example: If $50 applied, you can correct up to -$50, not -$100
+
+Q: My vendor code doesn't match. What should I do?
+
+A: Vendor codes must match exactly:
+   - Check Masters → Vendor Master for correct prefix
+   - Vendor codes are case-insensitive but must match otherwise
+   - Update your PO file with correct vendor codes
+   - Or add the vendor to Masters if it doesn't exist
+
+Q: The reconciliation is taking too long. Is this normal?
+
+A: Processing time depends on:
+   - Number of transactions in the batch
+   - Number of purchase orders
+   - Complexity of matching logic
+   - Large batches (1000+ transactions) may take 30-60 seconds
+   - This is normal - wait for the spinner to complete
+
+Q: I uploaded the wrong file. How do I remove it?
+
+A: Use the rollback feature:
+   1. Go to PO Data or CC Data page
+   2. Click "Manage Imports" expander
+   3. Select the batch you want to remove
+   4. Click "Rollback Selected Batches"
+   WARNING: This cannot be undone!
+
+Q: Can I edit vendor information after it's created?
+
+A: Yes, but limited:
+   - You can edit Payment Terms and CC Fee inline in the table
+   - PREFIX, VENDOR_NAME, CATEGORY, and DEPT cannot be edited inline
+   - To change those, you may need to contact administrator or use legacy form
+
+Q: What does "Grace Days" mean?
+
+A: Grace Days is a buffer period for matching POs to CC transactions:
+   - Default: 5 days
+   - For payment terms > 0: Looks back (CC Date - Payment Terms - Grace Days)
+   - For payment terms = 0: Looks (CC Date - Grace Days) to (CC Date + Grace Days)
+   - Increase if POs are dated further from CC transactions
+   - Decrease for stricter matching
+
+Q: How are PO deductions cumulative?
+
+A: PO deductions persist across all reconciliations:
+   - When you apply $100 to PO-123, it's saved permanently
+   - Next reconciliation: Available = Original - $100
+   - If you apply another $50: Available = Original - $150
+   - Deductions are tracked by CC Batch ID for audit trail
+
+Q: What's the difference between "Download Reco" and sidebar download?
+
+A:
+   - Sidebar Download: Single batch, all fields, quick access
+   - Download Reco Page: Multiple batches, selected columns only, optimized for Excel
+
+Q: Why are some transactions automatically processed in Common tab?
+
+A: Transactions under $100 are automatically assigned to FBM department:
+   - This saves time on small transactions
+   - You only need to review transactions $100 and above
+   - This is a system default to improve efficiency
+
+Q: Can I change the automatic $100 threshold?
+
+A: No, this is a system default. Contact administrator if you need this changed.
+
+Q: What happens if I don't process Common transactions?
+
+A: They remain in "Common" status:
+   - They won't appear in Results summary
+   - They won't be included in reconciliation calculations
+   - You should process them to complete the reconciliation
+
+Q: How do I know which POs matched which CC transactions?
+
+A: Use the Analysis tab:
+   1. Select a vendor
+   2. Go to "PO Details" subtab to see matched POs
+   3. Go to "CC Transaction Details" subtab to see CC transactions
+   4. The date windows show the matching logic
+
+Q: The download file has too many columns. Can I get fewer?
+
+A: The "Download Reco" page already provides optimized columns:
+   - Only essential fields for analysis
+   - PO_Number and CC_Reference_ID as comma-separated lists
+   - Perfect for Excel filtering and VLOOKUP
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ERROR MESSAGES EXPLAINED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"Insufficient balance. Available: $X, Requested: $Y"
+- You're trying to apply more than what's available
+- Check the Available column in PO Details
+- Reduce the deduction amount
+
+"Cannot apply negative amount. No amount has been applied yet."
+- You're trying to correct a deduction that doesn't exist
+- Check deduction history to see what's been applied
+- You can only correct existing deductions
+
+"Cannot reduce applied amount by $X. Only $Y has been applied."
+- Your negative amount exceeds what was applied
+- Maximum correction = total amount already applied
+- Example: If $100 applied, max correction is -$100
+
+"PO {number} is fully applied. No more amount available."
+- The PO has no remaining balance
+- Check the Available column (should be 0 or negative)
+- You cannot apply more to this PO
+
+"Duplicate CC_Reference_ID values found"
+- Your CC file has duplicate reference IDs
+- Each transaction must have a unique CC_Reference_ID
+- Remove duplicates from your file before uploading
+
+"Vendor master file not found"
+- Vendor master data hasn't been set up
+- Contact administrator to set up vendor master data
+- Reconciliation cannot work without vendor masters
+
+"Unable to read CC data" or "Unable to read PO data"
+- Data files may be corrupted
+- Contact administrator to check system files
+- May need to re-upload data
+
+================================================================================
+11. GLOSSARY OF TERMS
+================================================================================
+
+ADJUSTED_PO_AMOUNT:
+The PO amount used for reconciliation calculations. Equals Applied_Amount if
+deductions exist, otherwise equals Original_PO_Amount.
+
+APPLIED_AMOUNT:
+The cumulative total of all deductions (positive and negative) applied to a PO.
+Also called Total_Deductions.
+
+AVAILABLE BALANCE:
+The remaining amount on a PO after deductions: Original_PO_Amount - Applied_Amount.
+
+BATCH ID:
+A unique identifier for a group of imported records. Format varies:
+- PO batches: POBATCH-{timestamp}
+- CC batches: CCBATCH-{last4digits}-{MMDDYYYY}
+
+CC FEE:
+Credit card fee rate, expressed as a decimal (e.g., 0.03 = 3%). Applied to
+original PO amounts to calculate Total_CC_Charge.
+
+CC_REFERENCE_ID:
+A unique identifier for each credit card transaction. Must be unique across
+all transactions.
+
+CATEGORY:
+Vendor classification:
+- ONLY FBA: Vendor only for FBA department
+- ONLY FBM: Vendor only for FBM department
+- COMMON: Vendor used by both (requires department assignment)
+- NOT AVBL: Vendor excluded from reconciliation
+
+COMMON TRANSACTION:
+A transaction that matched a vendor marked as "COMMON" and needs department
+assignment (FBA or FBM).
+
+COMPARISON_AMOUNT:
+The amount used to compare CC transactions with POs. Equals Applied_Amount if
+deductions exist, otherwise Original_PO_Amount.
+
+DEDUCTION:
+An amount applied from a PO to a CC batch. Can be positive (apply) or negative
+(correct). Deductions are cumulative and persistent.
+
+DEPT:
+Department classification: FBA (Fulfillment by Amazon) or FBM (Fulfillment by
+Merchant).
+
+GRACE DAYS:
+A buffer period (default 5 days) that extends the date window for matching POs
+to CC transactions.
+
+GREEN FLAG:
+Indicates CC Amount ≤ PO Amount. Everything looks good, no action needed.
+
+MAPPED TRANSACTION:
+A CC transaction that was successfully matched to a vendor and has a clear
+department assignment.
+
+ORIGINAL_PO_AMOUNT:
+The original amount of the purchase order. Never changes, even after deductions.
+
+PAYMENT TERMS:
+The number of days until payment is due:
+- 0 = Pre-payment (payment before delivery)
+- 10 = Net 10 (payment due in 10 days)
+- 15 = Net 15 (payment due in 15 days)
+- 30 = Net 30 (payment due in 30 days)
+
+PREFIX:
+Vendor code/identifier. Must match exactly between PO data and master data.
+
+RED FLAG:
+Indicates CC Amount > PO Amount. Needs investigation - may indicate missing PO,
+amount mismatch, or need for deductions.
+
+ROLLBACK:
+Removing imported batches from the system. Cannot be undone.
+
+TOTAL_CC_CHARGE:
+The credit card fee amount calculated as: Original_PO_Amount × CC_Fee.
+
+TOTAL_DEDUCTIONS:
+Same as Applied_Amount - the cumulative total of all deductions applied to a PO.
+
+UNMAPPED TRANSACTION:
+A CC transaction that could not be matched to any vendor. Usually means the
+description doesn't exist in the mapping system.
+
+VENDOR_PREFIX:
+Same as PREFIX - the vendor code/identifier.
+
+WINDOW (Date Window):
+The date range used to match POs to CC transactions. Calculated based on:
+- CC transaction date
+- Payment terms
+- Grace days
+
+================================================================================
+QUICK REFERENCE CARD
+================================================================================
+
+UPLOAD PO DATA:
+1. PO Data → Upload file → Map columns → Import
+
+UPLOAD CC DATA:
+1. CC Data → Upload file → Map columns → Append
+
+RUN RECONCILIATION:
+1. Reco → Select batch → Automatic
+
+PROCESS COMMON TRANSACTIONS:
+1. Reco → Common tab → Select dept → Apply
+
+APPLY PO DEDUCTIONS:
+1. Reco → Analysis → Select vendor → Enter amounts → Apply
+
+CORRECT DEDUCTION:
+1. Reco → Analysis → Select vendor → Enter negative amount → Apply
+
+ADD VENDOR MAPPING:
+1. Masters → Description Mapping → Add mapping
+
+DOWNLOAD RESULTS:
+1. Download Reco → Select batches → Generate → Download
+
+================================================================================
+NEED MORE HELP?
+================================================================================
+
+If you encounter issues not covered in this guide:
+
+1. Check the Troubleshooting section (Section 10)
+2. Review the relevant workflow (Section 9)
+3. Contact your system administrator
+4. Check that your data files are in the correct format
+5. Verify vendor master data is set up correctly
+
+================================================================================
+END OF USER GUIDE
+================================================================================
+
+This guide covers all features of the Ergode Credit Card Reconciliation System.
+Keep this guide handy for reference as you use the system.
+
+Last Updated: 2024
+Version: 2.0
+
