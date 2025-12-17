@@ -1760,28 +1760,24 @@ def build_results_df_from_batch(
             results_base["Payment_Terms_Numeric"] > 0,
             results_base["CC_Txn_Date_dt"] + pd.Timedelta(days=grace_days),
         )
+        # Keep each CC reference as a separate row (no aggregation)
+        # Deduplicate by CC_Reference_ID to avoid counting same transaction multiple times
         results_base_unique = results_base.drop_duplicates(
             subset=["CC_Reference_ID"], keep="first"
         )
-        results_df = (
-            results_base_unique.groupby(results_group_cols)
-            .agg(
-                Total_CC_Amount=("CC_Amt", "sum"),
-                Transaction_Count=("CC_Reference_ID", "nunique"),
-                CC_Reference_ID=(
-                    "CC_Reference_ID",
-                    lambda x: ", ".join(sorted(set(str(v) for v in x if pd.notna(v)))),
-                ),
-            )
-            .reset_index()
+
+        # Start with CC transactions - each CC_Reference_ID gets its own row
+        cc_expanded = results_base_unique[
+            results_group_cols + ["CC_Reference_ID", "CC_Amt"]
+        ].copy()
+        cc_expanded["Vendor_Prefix"] = (
+            cc_expanded["Vendor_Prefix"].astype(str).str.strip().str.upper()
         )
-        results_df["Total_CC_Amount"] = results_df["Total_CC_Amount"].fillna(0.0)
-        results_df["Transaction_Count"] = (
-            results_df["Transaction_Count"].fillna(0).astype(int)
-        )
-        results_df["Vendor_Prefix"] = (
-            results_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
-        )
+        cc_expanded.rename(columns={"CC_Amt": "Total_CC_Amount"}, inplace=True)
+        cc_expanded["Total_CC_Amount"] = pd.to_numeric(
+            cc_expanded["Total_CC_Amount"], errors="coerce"
+        ).fillna(0.0)
+        cc_expanded["CC_Transaction_Count"] = 1  # Each row is one transaction
 
         # Load PO data and match
         po_path = Path("records/po")
@@ -1844,8 +1840,18 @@ def build_results_df_from_batch(
             window_cols = window_cols.dropna(
                 subset=["CC_Txn_Date_dt", "Window_Start", "Window_End"]
             )
-            po_summary = pd.DataFrame(
-                columns=results_group_cols + ["Comparison_Amount"]
+            # Initialize po_expanded as empty DataFrame
+            po_expanded = pd.DataFrame(
+                columns=results_group_cols
+                + [
+                    "CC_Reference_ID",
+                    "PO_Number",
+                    "Comparison_Amount",
+                    "PO_Amount",
+                    "Original_PO_Amount",
+                    "Total_Deductions",
+                    "Adjusted_PO_Amount",
+                ]
             )
             if not window_cols.empty and not po_df.empty:
                 unique_vendors = window_cols["Vendor_Prefix"].dropna().unique()
@@ -1897,119 +1903,116 @@ def build_results_df_from_batch(
                     )
                     if valid_mask.any():
                         po_merge_data = po_merge.loc[valid_mask].copy()
-                        po_merge_unique = po_merge_data.drop_duplicates(
-                            subset=["PO_Number"], keep="first"
+                        # Keep each PO match as a separate row (no aggregation)
+                        # Each row represents one CC_Reference_ID matched to one PO_Number
+                        po_expanded = po_merge_data[
+                            results_group_cols
+                            + [
+                                "CC_Reference_ID",
+                                "PO_Number",
+                                "Comparison_Amount",
+                                "PO_Amount",
+                                "Original_PO_Amount",
+                                "Total_Deductions",
+                                "Adjusted_PO_Amount",
+                            ]
+                        ].copy()
+                        # Remove duplicates where same CC_Reference_ID matches same PO_Number
+                        po_expanded = po_expanded.drop_duplicates(
+                            subset=["CC_Reference_ID", "PO_Number"], keep="first"
                         )
-                        po_summary = (
-                            po_merge_unique.groupby(results_group_cols, dropna=False)
-                            .agg(
-                                Comparison_Amount=("Comparison_Amount", "sum"),
-                                Base_PO_Amount=("PO_Amount", "sum"),
-                                Original_PO_Amount_Sum=(
-                                    ("Original_PO_Amount", "sum")
-                                    if "Original_PO_Amount" in po_merge_unique.columns
-                                    else ("PO_Amount", "sum")
-                                ),
-                                PO_Transaction_Count=("PO_Number", "nunique"),
-                                PO_Number=(
-                                    "PO_Number",
-                                    lambda x: ", ".join(
-                                        sorted(set(str(v) for v in x if pd.notna(v)))
-                                    ),
-                                ),
-                            )
-                            .reset_index()
+                    else:
+                        po_expanded = pd.DataFrame(
+                            columns=results_group_cols
+                            + [
+                                "CC_Reference_ID",
+                                "PO_Number",
+                                "Comparison_Amount",
+                                "PO_Amount",
+                                "Original_PO_Amount",
+                                "Total_Deductions",
+                                "Adjusted_PO_Amount",
+                            ]
                         )
         except Exception:  # pylint: disable=broad-except
-            po_summary = pd.DataFrame(
+            po_expanded = pd.DataFrame(
                 columns=results_group_cols
-                + ["Comparison_Amount", "Base_PO_Amount", "PO_Transaction_Count"]
+                + [
+                    "CC_Reference_ID",
+                    "PO_Number",
+                    "Comparison_Amount",
+                    "PO_Amount",
+                    "Original_PO_Amount",
+                    "Total_Deductions",
+                    "Adjusted_PO_Amount",
+                ]
             )
 
-        # Merge PO summary with CC results
-        if "Payment_Terms" in results_df.columns:
-            results_df["Payment_Terms"] = pd.to_numeric(
-                results_df["Payment_Terms"], errors="coerce"
-            ).fillna(0)
-        if "Payment_Terms" in po_summary.columns:
-            po_summary["Payment_Terms"] = pd.to_numeric(
-                po_summary["Payment_Terms"], errors="coerce"
-            ).fillna(0)
+        # Merge CC and PO expanded data
+        # Each row represents one CC_Reference_ID matched to one PO_Number
+        # If a CC reference has multiple POs, it will have multiple rows (one per PO)
+        if not po_expanded.empty and "CC_Reference_ID" in po_expanded.columns:
+            # Merge on CC_Reference_ID only to allow multiple POs per CC reference
+            # This creates one row per CC_Reference_ID-PO_Number combination
+            results_df = cc_expanded.merge(
+                po_expanded,
+                on=["CC_Reference_ID"],
+                how="left",
+                suffixes=("", "_po"),
+            )
+            # Ensure group columns match (use CC version as source of truth)
+            for col in results_group_cols:
+                if f"{col}_po" in results_df.columns:
+                    # Use the CC version (should be the same, but CC is source of truth)
+                    results_df[col] = results_df[col].fillna(results_df[f"{col}_po"])
+                    results_df = results_df.drop(columns=[f"{col}_po"])
+        else:
+            # No PO matches, just use CC data with empty PO fields
+            results_df = cc_expanded.copy()
+            results_df["PO_Number"] = ""
+            results_df["Comparison_Amount"] = 0.0
+            results_df["PO_Amount"] = 0.0
+            results_df["Original_PO_Amount"] = 0.0
+            results_df["Total_Deductions"] = 0.0
+            results_df["Adjusted_PO_Amount"] = 0.0
 
-        for col in results_group_cols:
-            if col in results_df.columns and col in po_summary.columns:
-                if col == "Payment_Terms":
-                    continue
-                else:
-                    results_df[col] = results_df[col].astype(str).str.strip()
-                    po_summary[col] = po_summary[col].astype(str).str.strip()
+        # Handle CC references that have no PO matches
+        # These should still appear in the results with empty PO_Number
+        # The left merge above should already handle this, but ensure all CC references are included
 
-        results_df = results_df.merge(
-            po_summary,
-            on=results_group_cols,
-            how="left",
-        ).rename(
+        # Rename columns for consistency
+        results_df.rename(
             columns={
                 "Comparison_Amount": "Total_PO_Amount",
-                "Base_PO_Amount": "Base_PO_Amount",
-                "Transaction_Count": "CC_Transaction_Count",
-            }
+                "PO_Amount": "Base_PO_Amount",
+            },
+            inplace=True,
         )
+
+        # Fill missing values
         results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
         results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
-        if "Original_PO_Amount_Sum" in results_df.columns:
-            results_df["Original_PO_Amount_Sum"] = results_df[
-                "Original_PO_Amount_Sum"
-            ].fillna(0.0)
+        results_df["PO_Number"] = results_df["PO_Number"].fillna("")
+        results_df["CC_Reference_ID"] = results_df["CC_Reference_ID"].fillna("")
+        results_df["Original_PO_Amount"] = results_df["Original_PO_Amount"].fillna(0.0)
+        results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
+        results_df["Adjusted_PO_Amount"] = results_df["Adjusted_PO_Amount"].fillna(0.0)
+
+        # For Original_PO_Amount_Sum, use Original_PO_Amount (same value per row now)
+        if "Original_PO_Amount" in results_df.columns:
+            results_df["Original_PO_Amount_Sum"] = results_df["Original_PO_Amount"]
         else:
             results_df["Original_PO_Amount_Sum"] = results_df["Base_PO_Amount"]
-        results_df["PO_Transaction_Count"] = (
-            results_df["PO_Transaction_Count"].fillna(0).astype(int)
-        )
-        # Fill PO_Number and CC_Reference_ID with empty string if not present
-        if "PO_Number" in results_df.columns:
-            results_df["PO_Number"] = results_df["PO_Number"].fillna("")
-        else:
-            results_df["PO_Number"] = ""
-        if "CC_Reference_ID" in results_df.columns:
-            results_df["CC_Reference_ID"] = results_df["CC_Reference_ID"].fillna("")
-        else:
-            results_df["CC_Reference_ID"] = ""
 
-        # Calculate Total_Deductions per vendor/dept
-        deductions_df = load_po_deductions()
-        if not deductions_df.empty and not po_df.empty and "PO_Number" in po_df.columns:
-            merge_cols = ["PO_Number", "Vendor_Prefix", "Dept"]
-            if "Payment_Terms" in po_df.columns:
-                merge_cols.append("Payment_Terms")
+        # PO_Transaction_Count is 1 per row (each row is one PO)
+        results_df["PO_Transaction_Count"] = 1
 
-            deduction_group_cols = ["Vendor_Prefix", "Dept"]
-            if "Payment_Terms" in po_df.columns:
-                deduction_group_cols.append("Payment_Terms")
-
-            deduction_merged = deductions_df.merge(
-                po_df[merge_cols],
-                on="PO_Number",
-                how="inner",
-            )
-
-            deduction_merged["Deduction_Amount"] = pd.to_numeric(
-                deduction_merged["Deduction_Amount"], errors="coerce"
-            ).fillna(0.0)
-
-            deduction_summary = (
-                deduction_merged.groupby(deduction_group_cols)
-                .agg({"Deduction_Amount": "sum"})
-                .reset_index()
-                .rename(columns={"Deduction_Amount": "Total_Deductions"})
-            )
-
-            results_df = results_df.merge(
-                deduction_summary, on=deduction_group_cols, how="left"
-            )
-            results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
-        else:
+        # Total_Deductions is already included from po_expanded merge above
+        # It represents the deduction amount for the specific PO in this row
+        # Ensure it's filled if missing
+        if "Total_Deductions" not in results_df.columns:
             results_df["Total_Deductions"] = 0.0
+        results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
 
         results_df["Total_CC_Charge"] = 0.0
         results_df["Flag"] = np.where(
@@ -3515,8 +3518,18 @@ def render_reco() -> None:
 
             # Keep all PO rows including duplicates (multiple line items)
             # Don't aggregate - count every line item separately
-            po_summary = pd.DataFrame(
-                columns=results_group_cols + ["Comparison_Amount"]
+            # Initialize po_expanded as empty DataFrame (will be populated if matches found)
+            po_expanded = pd.DataFrame(
+                columns=results_group_cols
+                + [
+                    "CC_Reference_ID",
+                    "PO_Number",
+                    "Comparison_Amount",
+                    "PO_Amount",
+                    "Original_PO_Amount",
+                    "Total_Deductions",
+                    "Adjusted_PO_Amount",
+                ]
             )
             # Use ALL CC transactions (not just unique groups) to match against POs
             # This ensures we capture all PO matching windows
