@@ -3122,16 +3122,21 @@ def render_download_reco() -> None:
         st.info("Please select at least one batch to download.")
         return
 
-    # Grace days - default to 5, UI input commented for future feature
-    # TODO: Add UI input for Grace Days Buffer in future version
-    # grace_days = st.number_input(
-    #     "Grace Days Buffer",
-    #     min_value=0,
-    #     max_value=30,
-    #     value=5,
-    #     help="Number of grace days for PO matching window",
-    # )
-    grace_days = 5  # Default grace days for PO matching window
+    # Grace days input - same as in reconciliation tab
+    widget_kwargs = {
+        "label": "Grace Days Buffer",
+        "min_value": 0,
+        "max_value": 90,
+        "step": 1,
+        "key": "download_grace_days",
+        "help": "Adjust additional buffer days when comparing CC and PO dates.",
+    }
+    if "download_grace_days" not in st.session_state:
+        widget_kwargs["value"] = 5
+
+    st.number_input(**widget_kwargs)
+    # Get grace_days from session state after widget creation
+    grace_days = int(st.session_state.get("download_grace_days", 5))
 
     # Generate and Download buttons in same row
     col_generate, col_download = st.columns(2)
