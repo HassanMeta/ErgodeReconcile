@@ -1,4 +1,5 @@
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 import re
 
@@ -1524,6 +1525,12 @@ def run_reconciliation(batch_df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with reconciliation results
     """
+    # Filter out negative CC amounts
+    if "CC_Amt" in batch_df.columns:
+        batch_df = batch_df.copy()
+        batch_df["CC_Amt"] = pd.to_numeric(batch_df["CC_Amt"], errors="coerce")
+        batch_df = batch_df[batch_df["CC_Amt"] > 0].copy()
+
     try:
         mappings_df = read_parquet_with_fallback(Path("data/mappings"))
         master_df = read_parquet_with_fallback(Path("data/master"))
@@ -1760,24 +1767,28 @@ def build_results_df_from_batch(
             results_base["Payment_Terms_Numeric"] > 0,
             results_base["CC_Txn_Date_dt"] + pd.Timedelta(days=grace_days),
         )
-        # Keep each CC reference as a separate row (no aggregation)
-        # Deduplicate by CC_Reference_ID to avoid counting same transaction multiple times
         results_base_unique = results_base.drop_duplicates(
             subset=["CC_Reference_ID"], keep="first"
         )
-
-        # Start with CC transactions - each CC_Reference_ID gets its own row
-        cc_expanded = results_base_unique[
-            results_group_cols + ["CC_Reference_ID", "CC_Amt"]
-        ].copy()
-        cc_expanded["Vendor_Prefix"] = (
-            cc_expanded["Vendor_Prefix"].astype(str).str.strip().str.upper()
+        results_df = (
+            results_base_unique.groupby(results_group_cols)
+            .agg(
+                Total_CC_Amount=("CC_Amt", "sum"),
+                Transaction_Count=("CC_Reference_ID", "nunique"),
+                CC_Reference_ID=(
+                    "CC_Reference_ID",
+                    lambda x: ", ".join(sorted(set(str(v) for v in x if pd.notna(v)))),
+                ),
+            )
+            .reset_index()
         )
-        cc_expanded.rename(columns={"CC_Amt": "Total_CC_Amount"}, inplace=True)
-        cc_expanded["Total_CC_Amount"] = pd.to_numeric(
-            cc_expanded["Total_CC_Amount"], errors="coerce"
-        ).fillna(0.0)
-        cc_expanded["CC_Transaction_Count"] = 1  # Each row is one transaction
+        results_df["Total_CC_Amount"] = results_df["Total_CC_Amount"].fillna(0.0)
+        results_df["Transaction_Count"] = (
+            results_df["Transaction_Count"].fillna(0).astype(int)
+        )
+        results_df["Vendor_Prefix"] = (
+            results_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
+        )
 
         # Load PO data and match
         po_path = Path("records/po")
@@ -1840,18 +1851,8 @@ def build_results_df_from_batch(
             window_cols = window_cols.dropna(
                 subset=["CC_Txn_Date_dt", "Window_Start", "Window_End"]
             )
-            # Initialize po_expanded as empty DataFrame
-            po_expanded = pd.DataFrame(
-                columns=results_group_cols
-                + [
-                    "CC_Reference_ID",
-                    "PO_Number",
-                    "Comparison_Amount",
-                    "PO_Amount",
-                    "Original_PO_Amount",
-                    "Total_Deductions",
-                    "Adjusted_PO_Amount",
-                ]
+            po_summary = pd.DataFrame(
+                columns=results_group_cols + ["Comparison_Amount"]
             )
             if not window_cols.empty and not po_df.empty:
                 unique_vendors = window_cols["Vendor_Prefix"].dropna().unique()
@@ -1903,116 +1904,119 @@ def build_results_df_from_batch(
                     )
                     if valid_mask.any():
                         po_merge_data = po_merge.loc[valid_mask].copy()
-                        # Keep each PO match as a separate row (no aggregation)
-                        # Each row represents one CC_Reference_ID matched to one PO_Number
-                        po_expanded = po_merge_data[
-                            results_group_cols
-                            + [
-                                "CC_Reference_ID",
-                                "PO_Number",
-                                "Comparison_Amount",
-                                "PO_Amount",
-                                "Original_PO_Amount",
-                                "Total_Deductions",
-                                "Adjusted_PO_Amount",
-                            ]
-                        ].copy()
-                        # Remove duplicates where same CC_Reference_ID matches same PO_Number
-                        po_expanded = po_expanded.drop_duplicates(
-                            subset=["CC_Reference_ID", "PO_Number"], keep="first"
+                        po_merge_unique = po_merge_data.drop_duplicates(
+                            subset=["PO_Number"], keep="first"
                         )
-                    else:
-                        po_expanded = pd.DataFrame(
-                            columns=results_group_cols
-                            + [
-                                "CC_Reference_ID",
-                                "PO_Number",
-                                "Comparison_Amount",
-                                "PO_Amount",
-                                "Original_PO_Amount",
-                                "Total_Deductions",
-                                "Adjusted_PO_Amount",
-                            ]
+                        po_summary = (
+                            po_merge_unique.groupby(results_group_cols, dropna=False)
+                            .agg(
+                                Comparison_Amount=("Comparison_Amount", "sum"),
+                                Base_PO_Amount=("PO_Amount", "sum"),
+                                Original_PO_Amount_Sum=(
+                                    ("Original_PO_Amount", "sum")
+                                    if "Original_PO_Amount" in po_merge_unique.columns
+                                    else ("PO_Amount", "sum")
+                                ),
+                                PO_Transaction_Count=("PO_Number", "nunique"),
+                                PO_Number=(
+                                    "PO_Number",
+                                    lambda x: ", ".join(
+                                        sorted(set(str(v) for v in x if pd.notna(v)))
+                                    ),
+                                ),
+                            )
+                            .reset_index()
                         )
         except Exception:  # pylint: disable=broad-except
-            po_expanded = pd.DataFrame(
+            po_summary = pd.DataFrame(
                 columns=results_group_cols
-                + [
-                    "CC_Reference_ID",
-                    "PO_Number",
-                    "Comparison_Amount",
-                    "PO_Amount",
-                    "Original_PO_Amount",
-                    "Total_Deductions",
-                    "Adjusted_PO_Amount",
-                ]
+                + ["Comparison_Amount", "Base_PO_Amount", "PO_Transaction_Count"]
             )
 
-        # Merge CC and PO expanded data
-        # Each row represents one CC_Reference_ID matched to one PO_Number
-        # If a CC reference has multiple POs, it will have multiple rows (one per PO)
-        if not po_expanded.empty and "CC_Reference_ID" in po_expanded.columns:
-            # Merge on CC_Reference_ID only to allow multiple POs per CC reference
-            # This creates one row per CC_Reference_ID-PO_Number combination
-            results_df = cc_expanded.merge(
-                po_expanded,
-                on=["CC_Reference_ID"],
-                how="left",
-                suffixes=("", "_po"),
-            )
-            # Ensure group columns match (use CC version as source of truth)
-            for col in results_group_cols:
-                if f"{col}_po" in results_df.columns:
-                    # Use the CC version (should be the same, but CC is source of truth)
-                    results_df[col] = results_df[col].fillna(results_df[f"{col}_po"])
-                    results_df = results_df.drop(columns=[f"{col}_po"])
-        else:
-            # No PO matches, just use CC data with empty PO fields
-            results_df = cc_expanded.copy()
-            results_df["PO_Number"] = ""
-            results_df["Comparison_Amount"] = 0.0
-            results_df["PO_Amount"] = 0.0
-            results_df["Original_PO_Amount"] = 0.0
-            results_df["Total_Deductions"] = 0.0
-            results_df["Adjusted_PO_Amount"] = 0.0
+        # Merge PO summary with CC results
+        if "Payment_Terms" in results_df.columns:
+            results_df["Payment_Terms"] = pd.to_numeric(
+                results_df["Payment_Terms"], errors="coerce"
+            ).fillna(0)
+        if "Payment_Terms" in po_summary.columns:
+            po_summary["Payment_Terms"] = pd.to_numeric(
+                po_summary["Payment_Terms"], errors="coerce"
+            ).fillna(0)
 
-        # Handle CC references that have no PO matches
-        # These should still appear in the results with empty PO_Number
-        # The left merge above should already handle this, but ensure all CC references are included
+        for col in results_group_cols:
+            if col in results_df.columns and col in po_summary.columns:
+                if col == "Payment_Terms":
+                    continue
+                else:
+                    results_df[col] = results_df[col].astype(str).str.strip()
+                    po_summary[col] = po_summary[col].astype(str).str.strip()
 
-        # Rename columns for consistency
-        results_df.rename(
+        results_df = results_df.merge(
+            po_summary,
+            on=results_group_cols,
+            how="left",
+        ).rename(
             columns={
                 "Comparison_Amount": "Total_PO_Amount",
-                "PO_Amount": "Base_PO_Amount",
-            },
-            inplace=True,
+                "Base_PO_Amount": "Base_PO_Amount",
+                "Transaction_Count": "CC_Transaction_Count",
+            }
         )
-
-        # Fill missing values
         results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
         results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
-        results_df["PO_Number"] = results_df["PO_Number"].fillna("")
-        results_df["CC_Reference_ID"] = results_df["CC_Reference_ID"].fillna("")
-        results_df["Original_PO_Amount"] = results_df["Original_PO_Amount"].fillna(0.0)
-        results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
-        results_df["Adjusted_PO_Amount"] = results_df["Adjusted_PO_Amount"].fillna(0.0)
-
-        # For Original_PO_Amount_Sum, use Original_PO_Amount (same value per row now)
-        if "Original_PO_Amount" in results_df.columns:
-            results_df["Original_PO_Amount_Sum"] = results_df["Original_PO_Amount"]
+        if "Original_PO_Amount_Sum" in results_df.columns:
+            results_df["Original_PO_Amount_Sum"] = results_df[
+                "Original_PO_Amount_Sum"
+            ].fillna(0.0)
         else:
             results_df["Original_PO_Amount_Sum"] = results_df["Base_PO_Amount"]
+        results_df["PO_Transaction_Count"] = (
+            results_df["PO_Transaction_Count"].fillna(0).astype(int)
+        )
+        # Fill PO_Number and CC_Reference_ID with empty string if not present
+        if "PO_Number" in results_df.columns:
+            results_df["PO_Number"] = results_df["PO_Number"].fillna("")
+        else:
+            results_df["PO_Number"] = ""
+        if "CC_Reference_ID" in results_df.columns:
+            results_df["CC_Reference_ID"] = results_df["CC_Reference_ID"].fillna("")
+        else:
+            results_df["CC_Reference_ID"] = ""
 
-        # PO_Transaction_Count is 1 per row (each row is one PO)
-        results_df["PO_Transaction_Count"] = 1
+        # Calculate Total_Deductions per vendor/dept
+        deductions_df = load_po_deductions()
+        if not deductions_df.empty and not po_df.empty and "PO_Number" in po_df.columns:
+            merge_cols = ["PO_Number", "Vendor_Prefix", "Dept"]
+            if "Payment_Terms" in po_df.columns:
+                merge_cols.append("Payment_Terms")
 
-        # Total_Deductions is already included from po_expanded merge above
-        # It represents the deduction amount for the specific PO in this row
-        # Ensure it's filled if missing
-        if "Total_Deductions" not in results_df.columns:
+            deduction_group_cols = ["Vendor_Prefix", "Dept"]
+            if "Payment_Terms" in po_df.columns:
+                deduction_group_cols.append("Payment_Terms")
+
+            deduction_merged = deductions_df.merge(
+                po_df[merge_cols],
+                on="PO_Number",
+                how="inner",
+            )
+
+            deduction_merged["Deduction_Amount"] = pd.to_numeric(
+                deduction_merged["Deduction_Amount"], errors="coerce"
+            ).fillna(0.0)
+
+            deduction_summary = (
+                deduction_merged.groupby(deduction_group_cols)
+                .agg({"Deduction_Amount": "sum"})
+                .reset_index()
+                .rename(columns={"Deduction_Amount": "Total_Deductions"})
+            )
+
+            results_df = results_df.merge(
+                deduction_summary, on=deduction_group_cols, how="left"
+            )
+            results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
+        else:
             results_df["Total_Deductions"] = 0.0
-        results_df["Total_Deductions"] = results_df["Total_Deductions"].fillna(0.0)
 
         results_df["Total_CC_Charge"] = 0.0
         results_df["Flag"] = np.where(
@@ -3072,7 +3076,7 @@ def render_download_reco() -> None:
         unsafe_allow_html=True,
     )
     st.markdown(
-        "*Select multiple batches and download combined reconciliation results*"
+        "*Select multiple batches and download Excel file with all reconciliation tabs*"
     )
 
     # Load CC data to get available batches
@@ -3134,39 +3138,50 @@ def render_download_reco() -> None:
 
     with col_generate:
         generate_clicked = st.button(
-            "Generate and Download CSV", type="primary", use_container_width=True
+            "Generate and Download Excel File", type="primary", use_container_width=True
         )
 
     # Download button will be shown after generation
     download_ready = st.session_state.get("download_reco_ready", False)
-    csv_data = st.session_state.get("download_reco_csv_data", None)
+    excel_data = st.session_state.get("download_reco_excel_data", None)
     filename = st.session_state.get("download_reco_filename", None)
 
     with col_download:
-        if download_ready and csv_data and filename:
+        if download_ready and excel_data and filename:
             st.download_button(
-                label="Download Combined Reconciliation Results",
-                data=csv_data,
+                type="primary",
+                label="Download Excel File",
+                data=excel_data,
                 file_name=filename,
-                mime="text/csv",
-                key="download_combined_reco",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_excel_reco",
                 use_container_width=True,
-                help=f"Download complete reconciliation results for {len(selected_batches)} batch(es) with all fields, flags, and calculations",
+                help=f"Download Excel file with all reconciliation tabs for {len(selected_batches)} batch(es)",
             )
         else:
             st.button(
-                "Download Combined Reconciliation Results",
+                "Download Excel File",
                 disabled=True,
                 use_container_width=True,
-                help="Generate CSV first to enable download",
+                help="Generate Excel file first to enable download",
             )
 
     if generate_clicked:
         # Clear previous download state
         st.session_state["download_reco_ready"] = False
-        st.session_state.pop("download_reco_csv_data", None)
+        st.session_state.pop("download_reco_excel_data", None)
         st.session_state.pop("download_reco_filename", None)
+
+        # Initialize combined data for all tabs
         all_results = []
+        all_mapped = []
+        all_common = []
+        all_unmapped = []
+        all_others = []
+        all_analysis_grouped = []
+        all_analysis_po = []
+        all_analysis_cc = []
+
         progress_bar = st.progress(0)
         status_text = st.empty()
 
@@ -3176,24 +3191,290 @@ def render_download_reco() -> None:
             progress_bar.progress((idx + 1) / total_batches)
 
             try:
-                # Get batch data
+                # Get batch data (filter negative amounts)
                 batch_df = cc_df[
                     cc_df["Import_Batch_ID"].astype(str) == batch_id
                 ].copy()
+
+                # Filter out negative CC amounts
+                if "CC_Amt" in batch_df.columns:
+                    batch_df["CC_Amt"] = pd.to_numeric(
+                        batch_df["CC_Amt"], errors="coerce"
+                    )
+                    batch_df = batch_df[batch_df["CC_Amt"] > 0].copy()
 
                 if batch_df.empty:
                     st.warning(f"No transactions found for batch {batch_id}. Skipping.")
                     continue
 
-                # Build results_df for this batch
+                # Run reconciliation
+                reco_df = run_reconciliation(batch_df)
+
+                if reco_df.empty:
+                    continue
+
+                # Categorize transactions
+                display_df = reco_df.drop(columns=["Import_Batch_ID"], errors="ignore")
+                category_series = display_df["Category"].astype(str).str.upper()
+                common_df = display_df[category_series == "COMMON"].copy()
+                unmapped_df = display_df[category_series == "UNMAPPED"].copy()
+                others_df = display_df[category_series == "NOT AVBL"].copy()
+                mapped_df = display_df[
+                    ~category_series.isin(["UNMAPPED", "COMMON", "NOT AVBL"])
+                ].copy()
+
+                # Build results_df (grouped summary)
                 results_df = build_results_df_from_batch(
                     batch_df, grace_days=grace_days
                 )
 
                 if not results_df.empty:
-                    # Add batch ID column to identify which batch each row belongs to
                     results_df["Batch_ID"] = batch_id
                     all_results.append(results_df)
+
+                # Add batch ID to other tabs
+                if not mapped_df.empty:
+                    mapped_df = mapped_df.copy()
+                    mapped_df["Batch_ID"] = batch_id
+                    all_mapped.append(mapped_df)
+
+                if not common_df.empty:
+                    common_df = common_df.copy()
+                    common_df["Batch_ID"] = batch_id
+                    all_common.append(common_df)
+
+                if not unmapped_df.empty:
+                    unmapped_df = unmapped_df.copy()
+                    unmapped_df["Batch_ID"] = batch_id
+                    all_unmapped.append(unmapped_df)
+
+                if not others_df.empty:
+                    others_df = others_df.copy()
+                    others_df["Batch_ID"] = batch_id
+                    all_others.append(others_df)
+
+                # Extract Analysis data (PO Details, CC Details, Grouped Results)
+                # Get results_base_data and po_merge_data similar to render_reco
+                if not mapped_df.empty:
+                    results_base = mapped_df.assign(
+                        CC_Amt=pd.to_numeric(mapped_df["CC_Amt"], errors="coerce")
+                    ).fillna(
+                        {
+                            "CC_Txn_Date": "<missing date>",
+                            "Vendor_Prefix": "<missing prefix>",
+                            "Dept": "<missing dept>",
+                            "Payment_Terms": "<missing payment terms>",
+                        }
+                    )
+                    results_base["CC_Txn_Date_dt"] = pd.to_datetime(
+                        results_base["CC_Txn_Date"], errors="coerce"
+                    )
+                    results_base["Payment_Terms_Numeric"] = pd.to_numeric(
+                        results_base["Payment_Terms"], errors="coerce"
+                    ).fillna(0)
+                    results_base["Window_Start"] = (
+                        results_base["CC_Txn_Date_dt"]
+                        - pd.to_timedelta(
+                            results_base["Payment_Terms_Numeric"], unit="D"
+                        )
+                        - pd.Timedelta(days=grace_days)
+                    )
+                    results_base["Window_End"] = results_base["CC_Txn_Date_dt"].where(
+                        results_base["Payment_Terms_Numeric"] > 0,
+                        results_base["CC_Txn_Date_dt"] + pd.Timedelta(days=grace_days),
+                    )
+
+                    # CC Transaction Details for Analysis
+                    cc_details = results_base[
+                        [
+                            "CC_Txn_Date",
+                            "CC_Reference_ID",
+                            "CC_Description",
+                            "CC_Amt",
+                            "Vendor_Prefix",
+                            "Vendor_Name",
+                            "Category",
+                            "Dept",
+                            "Payment_Terms",
+                        ]
+                    ].copy()
+                    cc_details["Batch_ID"] = batch_id
+                    all_analysis_cc.append(cc_details)
+
+                    # Get PO merge data
+                    po_path = Path("records/po")
+                    try:
+                        po_df = read_parquet_with_fallback(po_path)
+                        po_df["Vendor_Prefix"] = (
+                            po_df["Vendor_Prefix"].astype(str).str.strip().str.upper()
+                        )
+                        po_df["PO_Date"] = pd.to_datetime(
+                            po_df["PO_Date"], errors="coerce"
+                        )
+
+                        window_cols = results_base[
+                            [
+                                "CC_Txn_Date",
+                                "Vendor_Prefix",
+                                "Dept",
+                                "Payment_Terms",
+                                "Window_Start",
+                                "Window_End",
+                                "CC_Txn_Date_dt",
+                                "CC_Reference_ID",
+                            ]
+                        ].copy()
+                        window_cols = window_cols.dropna(
+                            subset=["CC_Txn_Date_dt", "Window_Start", "Window_End"]
+                        )
+
+                        if not window_cols.empty and not po_df.empty:
+                            unique_vendors = (
+                                window_cols["Vendor_Prefix"].dropna().unique()
+                            )
+                            po_df_filtered = po_df[
+                                po_df["Vendor_Prefix"].isin(unique_vendors)
+                            ].copy()
+
+                            if not po_df_filtered.empty:
+                                if "Dept" in po_df_filtered.columns:
+                                    po_df_filtered["Dept"] = (
+                                        po_df_filtered["Dept"]
+                                        .astype(str)
+                                        .str.strip()
+                                        .str.upper()
+                                    )
+                                if "Dept" in window_cols.columns:
+                                    window_cols["Dept"] = (
+                                        window_cols["Dept"]
+                                        .astype(str)
+                                        .str.strip()
+                                        .str.upper()
+                                    )
+
+                                merge_keys = ["Vendor_Prefix"]
+                                if (
+                                    "Dept" in po_df_filtered.columns
+                                    and "Dept" in window_cols.columns
+                                ):
+                                    merge_keys.append("Dept")
+
+                                po_merge = window_cols.merge(
+                                    po_df_filtered,
+                                    on=merge_keys,
+                                    how="left",
+                                    suffixes=("", "_po"),
+                                )
+
+                                valid_mask = (
+                                    po_merge["PO_Date"].notna()
+                                    & po_merge["Window_Start"].notna()
+                                    & po_merge["Window_End"].notna()
+                                    & (po_merge["PO_Date"] >= po_merge["Window_Start"])
+                                    & (po_merge["PO_Date"] <= po_merge["Window_End"])
+                                )
+
+                                if valid_mask.any():
+                                    po_merge_data = po_merge.loc[valid_mask].copy()
+
+                                    # Apply PO deductions to get applied amounts
+                                    deductions_df = load_po_deductions()
+                                    if (
+                                        not deductions_df.empty
+                                        and "PO_Number" in po_merge_data.columns
+                                    ):
+                                        po_applications = (
+                                            deductions_df.groupby("PO_Number")
+                                            .agg({"Deduction_Amount": "sum"})
+                                            .reset_index()
+                                        )
+                                        po_applications.rename(
+                                            columns={
+                                                "Deduction_Amount": "Total_Deductions"
+                                            },
+                                            inplace=True,
+                                        )
+                                        po_merge_data = po_merge_data.merge(
+                                            po_applications, on="PO_Number", how="left"
+                                        )
+                                        po_merge_data["Total_Deductions"] = (
+                                            po_merge_data["Total_Deductions"].fillna(
+                                                0.0
+                                            )
+                                        )
+
+                                        # Calculate amounts
+                                        if "Total_PO_Amount" in po_merge_data.columns:
+                                            po_merge_data["Original_Amount"] = (
+                                                po_merge_data["Total_PO_Amount"]
+                                            )
+                                        else:
+                                            po_merge_data["Original_Amount"] = (
+                                                po_merge_data["PO_Amount"]
+                                            )
+
+                                        po_merge_data["Applied_Amount"] = po_merge_data[
+                                            "Total_Deductions"
+                                        ]
+                                        po_merge_data["Balance"] = (
+                                            po_merge_data["Original_Amount"]
+                                            - po_merge_data["Applied_Amount"]
+                                        )
+                                        # Amount to show: Applied if > 0, else Original
+                                        po_merge_data["Amount_To_Use"] = (
+                                            po_merge_data.apply(
+                                                lambda row: row["Applied_Amount"]
+                                                if row["Applied_Amount"] > 0
+                                                else row["Original_Amount"],
+                                                axis=1,
+                                            )
+                                        )
+                                    else:
+                                        # No deductions applied
+                                        if "Total_PO_Amount" in po_merge_data.columns:
+                                            po_merge_data["Original_Amount"] = (
+                                                po_merge_data["Total_PO_Amount"]
+                                            )
+                                        else:
+                                            po_merge_data["Original_Amount"] = (
+                                                po_merge_data["PO_Amount"]
+                                            )
+                                        po_merge_data["Applied_Amount"] = 0.0
+                                        po_merge_data["Balance"] = po_merge_data[
+                                            "Original_Amount"
+                                        ]
+                                        po_merge_data["Amount_To_Use"] = po_merge_data[
+                                            "Original_Amount"
+                                        ]
+
+                                    # Deduplicate by PO_Number to avoid repeating POs
+                                    po_merge_data = po_merge_data.drop_duplicates(
+                                        subset=["PO_Number"], keep="first"
+                                    )
+
+                                    # Prepare PO Details for Analysis
+                                    po_details = po_merge_data[
+                                        [
+                                            "PO_Date",
+                                            "PO_Number",
+                                            "Original_Amount",
+                                            "Applied_Amount",
+                                            "Balance",
+                                            "Amount_To_Use",
+                                            "Vendor_Prefix",
+                                            "Dept",
+                                        ]
+                                    ].copy()
+                                    po_details["Batch_ID"] = batch_id
+                                    all_analysis_po.append(po_details)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+
+                    # Grouped Results for Analysis (same as results_df but with all vendors)
+                    if not results_df.empty:
+                        grouped_results = results_df.copy()
+                        grouped_results["Batch_ID"] = batch_id
+                        all_analysis_grouped.append(grouped_results)
 
             except Exception as exc:  # pylint: disable=broad-except
                 st.error(f"Error processing batch {batch_id}: {exc}")
@@ -3202,46 +3483,80 @@ def render_download_reco() -> None:
         progress_bar.empty()
         status_text.empty()
 
-        if not all_results:
+        # Combine all dataframes
+        combined_results = (
+            pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
+        )
+        combined_mapped = (
+            pd.concat(all_mapped, ignore_index=True) if all_mapped else pd.DataFrame()
+        )
+        combined_common = (
+            pd.concat(all_common, ignore_index=True) if all_common else pd.DataFrame()
+        )
+        combined_unmapped = (
+            pd.concat(all_unmapped, ignore_index=True)
+            if all_unmapped
+            else pd.DataFrame()
+        )
+        combined_others = (
+            pd.concat(all_others, ignore_index=True) if all_others else pd.DataFrame()
+        )
+        combined_analysis_grouped = (
+            pd.concat(all_analysis_grouped, ignore_index=True)
+            if all_analysis_grouped
+            else pd.DataFrame()
+        )
+        combined_analysis_po = (
+            pd.concat(all_analysis_po, ignore_index=True)
+            if all_analysis_po
+            else pd.DataFrame()
+        )
+        combined_analysis_cc = (
+            pd.concat(all_analysis_cc, ignore_index=True)
+            if all_analysis_cc
+            else pd.DataFrame()
+        )
+
+        if (
+            combined_results.empty
+            and combined_mapped.empty
+            and combined_common.empty
+            and combined_unmapped.empty
+            and combined_others.empty
+        ):
             st.error("No reconciliation data generated for selected batches.")
             return
 
-        # Combine all results
-        combined_df = pd.concat(all_results, ignore_index=True)
+        # Create Excel file with multiple sheets
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            # Write each tab to a separate sheet
+            if not combined_results.empty:
+                combined_results.to_excel(writer, sheet_name="Results", index=False)
+            if not combined_mapped.empty:
+                combined_mapped.to_excel(writer, sheet_name="Mapped", index=False)
+            if not combined_common.empty:
+                combined_common.to_excel(writer, sheet_name="Common", index=False)
+            if not combined_unmapped.empty:
+                combined_unmapped.to_excel(writer, sheet_name="Unmapped", index=False)
+            if not combined_others.empty:
+                combined_others.to_excel(writer, sheet_name="Others", index=False)
+            # Analysis sheets
+            if not combined_analysis_grouped.empty:
+                combined_analysis_grouped.to_excel(
+                    writer, sheet_name="Analysis_Grouped", index=False
+                )
+            if not combined_analysis_po.empty:
+                combined_analysis_po.to_excel(
+                    writer, sheet_name="Analysis_PO_Details", index=False
+                )
+            if not combined_analysis_cc.empty:
+                combined_analysis_cc.to_excel(
+                    writer, sheet_name="Analysis_CC_Details", index=False
+                )
 
-        # Select only the specified columns
-        required_columns = [
-            "CC_Txn_Date",
-            "Vendor_Prefix",
-            "Vendor_Name",
-            "Dept",
-            "Payment_Terms",
-            "Total_CC_Amount",
-            "CC_Transaction_Count",
-            "Total_PO_Amount",
-            "PO_Transaction_Count",
-            "Flag",
-            "PO_Number",
-            "CC_Reference_ID",
-        ]
-
-        # Fill missing columns with empty values
-        for col in required_columns:
-            if col not in combined_df.columns:
-                if col in ["PO_Number", "CC_Reference_ID", "Vendor_Name"]:
-                    combined_df[col] = ""
-                else:
-                    combined_df[col] = 0
-
-        # Select only the required columns in the specified order
-        combined_df = combined_df[required_columns]
-
-        # Convert dates to string for CSV
-        if "CC_Txn_Date" in combined_df.columns:
-            combined_df["CC_Txn_Date"] = combined_df["CC_Txn_Date"].astype(str)
-
-        # Generate CSV
-        csv_data = combined_df.to_csv(index=False)
+        excel_buffer.seek(0)
+        excel_data = excel_buffer.getvalue()
 
         # Generate filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3253,22 +3568,18 @@ def render_download_reco() -> None:
         )
         if len(selected_batches) > 3:
             sanitized_batches += f"_and_{len(selected_batches) - 3}_more"
-        filename = f"reconciliation_results_{sanitized_batches}_{timestamp}.csv"
+        filename = f"reconciliation_{sanitized_batches}_{timestamp}.xlsx"
 
         # Store in session state for download button
         st.session_state["download_reco_ready"] = True
-        st.session_state["download_reco_csv_data"] = csv_data
+        st.session_state["download_reco_excel_data"] = excel_data
         st.session_state["download_reco_filename"] = filename
 
         # Show summary
         st.success(
-            f"✅ Successfully processed {len(selected_batches)} batch(es) with "
-            f"{len(combined_df)} total reconciliation records. Click 'Download Combined Reconciliation Results' to download."
+            f"✅ Successfully processed {len(selected_batches)} batch(es). "
+            f"Click 'Download Excel File' to download."
         )
-
-        # Show preview (optional - user said not to display results, but a small summary might be helpful)
-        with st.expander("📊 Preview Summary (First 10 Rows)", expanded=False):
-            st.dataframe(combined_df.head(10), use_container_width=True)
 
         # Rerun to show the download button
         st.rerun()
@@ -3518,18 +3829,8 @@ def render_reco() -> None:
 
             # Keep all PO rows including duplicates (multiple line items)
             # Don't aggregate - count every line item separately
-            # Initialize po_expanded as empty DataFrame (will be populated if matches found)
-            po_expanded = pd.DataFrame(
-                columns=results_group_cols
-                + [
-                    "CC_Reference_ID",
-                    "PO_Number",
-                    "Comparison_Amount",
-                    "PO_Amount",
-                    "Original_PO_Amount",
-                    "Total_Deductions",
-                    "Adjusted_PO_Amount",
-                ]
+            po_summary = pd.DataFrame(
+                columns=results_group_cols + ["Comparison_Amount"]
             )
             # Use ALL CC transactions (not just unique groups) to match against POs
             # This ensures we capture all PO matching windows
@@ -4094,154 +4395,113 @@ def render_reco() -> None:
                     (col for col in ("CC_Amt", "Amount") if col in common_df), None
                 )
 
-                if amt_column is None:
-                    st.warning(
-                        "Unable to summarize common rows: amount column `CC_Amt` (or `Amount`) is missing."
-                    )
-                    display_df = pd.DataFrame(
-                        columns=["Description", "Amount", "Dept", "Transaction_Count"]
-                    )
-                else:
-                    # Group by description (normalized) instead of CC_Reference_ID
-                    working_df = common_df.copy()
-                    # Deduplicate by CC_Reference_ID to avoid double counting amounts
-                    if "CC_Reference_ID" in working_df.columns:
-                        working_df = working_df.drop_duplicates(
-                            subset=["CC_Reference_ID"], keep="first"
-                        )
-                    working_df["Amount"] = pd.to_numeric(
-                        working_df[amt_column], errors="coerce"
-                    )
+                # Show individual rows instead of grouped
+                display_df = common_df.copy()
 
-                    if desc_column:
-                        # Normalize description for grouping
-                        working_df["_norm_desc"] = (
-                            working_df[desc_column].astype(str).str.strip().str.upper()
-                        )
-                    else:
-                        working_df["_norm_desc"] = ""
+                # Prepare display columns
+                display_columns = []
+                if "CC_Reference_ID" in display_df.columns:
+                    display_columns.append("CC_Reference_ID")
+                if desc_column:
+                    display_columns.append(desc_column)
+                if amt_column:
+                    display_columns.append(amt_column)
+                if "Vendor_Prefix" in display_df.columns:
+                    display_columns.append("Vendor_Prefix")
+                if "Dept" in display_df.columns:
+                    display_columns.append("Dept")
 
-                    # Define aggregation function for reuse
-                    def agg_desc_group(group: pd.DataFrame) -> pd.Series:
-                        descriptions = (
-                            [
-                                value
-                                for value in group[desc_column]
-                                .dropna()
-                                .astype(str)
-                                .str.strip()
-                                .unique()
-                                .tolist()
-                                if value and value.lower() not in {"nan", "none", ""}
-                            ]
-                            if desc_column
-                            else []
-                        )
-
-                        description_value = descriptions[0] if descriptions else ""
-
-                        valid_amounts = group["Amount"].dropna()
-                        if valid_amounts.empty:
-                            total_amount = pd.NA
-                        else:
-                            total_amount = valid_amounts.sum()
-
-                        transaction_count = (
-                            group["CC_Reference_ID"].nunique()
-                            if "CC_Reference_ID" in group.columns
-                            else len(group)
-                        )
-
-                        # Get Vendor_Prefix (should be same for all rows in group)
-                        vendor_prefix_value = ""
-                        if "Vendor_Prefix" in group.columns:
-                            vendor_prefixes = (
-                                group["Vendor_Prefix"]
-                                .dropna()
-                                .astype(str)
-                                .str.strip()
-                                .unique()
-                                .tolist()
-                            )
-                            vendor_prefix_value = (
-                                vendor_prefixes[0] if vendor_prefixes else ""
-                            )
-
-                        return pd.Series(
-                            {
-                                "Description": description_value,
-                                "Amount": total_amount,
-                                "Transaction_Count": transaction_count,
-                                "Dept": "",
-                                "Vendor_Prefix": vendor_prefix_value,
-                            }
-                        )
-
-                    display_df = (
-                        working_df.groupby("_norm_desc", as_index=False)
-                        .apply(agg_desc_group)
-                        .reset_index(drop=True)
-                    )
-
-                    # Remove the temporary column
-                    if "_norm_desc" in display_df.columns:
-                        display_df = display_df.drop(columns=["_norm_desc"])
-
-                # Ensure correct column order
-                if "Transaction_Count" not in display_df.columns:
-                    display_df["Transaction_Count"] = 1
-
-                # Ensure Vendor_Prefix column exists
-                if "Vendor_Prefix" not in display_df.columns:
-                    display_df["Vendor_Prefix"] = ""
-
-                display_df = display_df[
-                    [
-                        "Description",
-                        "Amount",
-                        "Transaction_Count",
-                        "Dept",
-                        "Vendor_Prefix",
-                    ]
+                # Select only available columns
+                display_columns = [
+                    col for col in display_columns if col in display_df.columns
                 ]
+                display_df = display_df[display_columns].copy()
 
-                display_df["Amount"] = display_df["Amount"].apply(
-                    lambda value: round(float(value), 2)
-                    if pd.notna(value) and value != ""
-                    else value
-                )
+                # Rename columns for consistency
+                if desc_column and desc_column != "Description":
+                    display_df = display_df.rename(columns={desc_column: "Description"})
+                if amt_column and amt_column != "Amount":
+                    display_df = display_df.rename(columns={amt_column: "Amount"})
 
-                # Load saved Dept mappings from file (by CC_Reference_ID, aggregated by description)
-                # Only considers CC_Reference_IDs in current common_df (batch-specific)
+                # Ensure Amount is numeric
+                if "Amount" in display_df.columns:
+                    display_df["Amount"] = pd.to_numeric(
+                        display_df["Amount"], errors="coerce"
+                    )
+                    display_df["Amount"] = display_df["Amount"].apply(
+                        lambda value: round(float(value), 2)
+                        if pd.notna(value) and value != ""
+                        else value
+                    )
+
+                # Ensure Dept column exists
+                if "Dept" not in display_df.columns:
+                    display_df["Dept"] = ""
+
+                # Load saved Dept mappings from file (by CC_Reference_ID)
                 saved_dept_map = get_dept_mappings_for_common(common_df)
+
+                # Create mapping from CC_Reference_ID to Dept
+                saved_dept_by_ref_id = {}
+                if "CC_Reference_ID" in display_df.columns:
+                    saved_mappings_df = load_dept_mappings()
+                    if (
+                        not saved_mappings_df.empty
+                        and "CC_Reference_ID" in saved_mappings_df.columns
+                    ):
+                        saved_mappings_df["CC_Reference_ID"] = (
+                            saved_mappings_df["CC_Reference_ID"].astype(str).str.strip()
+                        )
+                        saved_dept_by_ref_id = dict(
+                            zip(
+                                saved_mappings_df["CC_Reference_ID"],
+                                saved_mappings_df["Dept"]
+                                .astype(str)
+                                .str.strip()
+                                .str.upper(),
+                            )
+                        )
 
                 # Merge with session state (session state takes precedence for current session)
                 existing_dept_choices: dict[str, str] = st.session_state.setdefault(
                     "common_dept_choices", {}
                 )
-                # Update session state with saved mappings if not already set
-                for desc_norm, dept in saved_dept_map.items():
-                    if desc_norm not in existing_dept_choices:
-                        existing_dept_choices[desc_norm] = dept
 
-                # Auto-assign FBM if total amount < 100
+                # Auto-assign FBM if amount < 100 for individual rows
                 def assign_dept(row):
-                    desc_key = str(row["Description"]).strip().upper()
-                    # Check session state first (user's current selection)
-                    if desc_key in existing_dept_choices:
-                        return existing_dept_choices[desc_key]
-                    # Check saved mappings
-                    if desc_key in saved_dept_map:
-                        return saved_dept_map[desc_key]
+                    # Check saved mapping by CC_Reference_ID first
+                    if "CC_Reference_ID" in row.index and pd.notna(
+                        row["CC_Reference_ID"]
+                    ):
+                        ref_id = str(row["CC_Reference_ID"]).strip()
+                        if ref_id in saved_dept_by_ref_id:
+                            return saved_dept_by_ref_id[ref_id]
+
+                    # Check description-based mapping
+                    if "Description" in row.index:
+                        desc_key = str(row["Description"]).strip().upper()
+                        if desc_key in existing_dept_choices:
+                            return existing_dept_choices[desc_key]
+                        if desc_key in saved_dept_map:
+                            return saved_dept_map[desc_key]
+
                     # Auto-assign FBM if amount < 100
-                    if pd.notna(row["Amount"]) and float(row["Amount"]) < 100:
-                        return "FBM"
+                    if "Amount" in row.index and pd.notna(row["Amount"]):
+                        try:
+                            amount_val = float(row["Amount"])
+                            if amount_val < 100:
+                                return "FBM"
+                        except (ValueError, TypeError):
+                            pass
+
                     # Otherwise keep existing value or empty
-                    return (
-                        row["Dept"]
-                        if pd.notna(row["Dept"]) and str(row["Dept"]).strip()
-                        else ""
-                    )
+                    if (
+                        "Dept" in row.index
+                        and pd.notna(row["Dept"])
+                        and str(row["Dept"]).strip()
+                    ):
+                        return row["Dept"]
+                    return ""
 
                 display_df["Dept"] = display_df.apply(assign_dept, axis=1)
 
@@ -4552,6 +4812,10 @@ def render_reco() -> None:
                         hide_index=True,
                         use_container_width=True,
                         column_config={
+                            "CC_Reference_ID": st.column_config.TextColumn(
+                                "CC Reference ID",
+                                disabled=True,
+                            ),
                             "Description": st.column_config.TextColumn(
                                 "Description",
                                 disabled=True,
@@ -4559,11 +4823,6 @@ def render_reco() -> None:
                             "Amount": st.column_config.NumberColumn(
                                 "Amount",
                                 format="$%0.2f",
-                                disabled=True,
-                            ),
-                            "Transaction_Count": st.column_config.NumberColumn(
-                                "Transaction Count",
-                                format="%d",
                                 disabled=True,
                             ),
                             "Dept": st.column_config.SelectboxColumn(
@@ -4575,13 +4834,12 @@ def render_reco() -> None:
                             "Vendor_Prefix": st.column_config.TextColumn(
                                 "Vendor Prefix",
                                 disabled=True,
-                                help="Current vendor prefix for this description group.",
+                                help="Current vendor prefix for this transaction.",
                             ),
                             "Apply": st.column_config.CheckboxColumn(
                                 "Apply",
                                 help=(
-                                    "Auto-checked for amounts < $100. Check to process this description group. "
-                                    "All transactions with the same description will be consolidated."
+                                    "Auto-checked for amounts < $100. Check to process this individual transaction."
                                 ),
                             ),
                         },
@@ -4604,61 +4862,35 @@ def render_reco() -> None:
                 edited_df["Apply"] = edited_df["Apply"].fillna(False).astype(bool)
 
                 # Save Dept selections to file by CC_Reference_ID (even if not applied)
-                # Only saves for CC_Reference_IDs in current common_df (batch-specific)
-                desc_column = next(
-                    (
-                        col
-                        for col in ("CC_Description", "Description")
-                        if col in common_df.columns
-                    ),
-                    None,
-                )
-                if desc_column:
+                # Now working with individual rows, so save directly by CC_Reference_ID
+                if "CC_Reference_ID" in edited_df.columns:
                     for _, row in edited_df.iterrows():
-                        if row["Dept"] in {"FBA", "FBM"}:
-                            desc_value = str(row["Description"]).strip()
-                            desc_norm = desc_value.upper()
+                        if row["Dept"] in {"FBA", "FBM"} and pd.notna(
+                            row.get("CC_Reference_ID")
+                        ):
+                            ref_id = str(row["CC_Reference_ID"]).strip()
+                            if ref_id:
+                                # Save mapping for this specific CC_Reference_ID
+                                save_dept_mappings([ref_id], row["Dept"])
+                                # Clear reconciliation cache to force refresh with updated mappings
+                                st.session_state.pop("reco_df", None)
+                                st.session_state.pop("current_reco_batch", None)
 
-                            # Find all CC_Reference_IDs with this description in current common_df
-                            # (common_df is already filtered by selected batch)
-                            desc_mask = (
-                                common_df[desc_column]
-                                .astype(str)
-                                .str.strip()
-                                .str.upper()
-                                == desc_norm
-                            )
-                            matching_rows = common_df.loc[desc_mask]
-
-                            if (
-                                not matching_rows.empty
-                                and "CC_Reference_ID" in matching_rows.columns
-                            ):
-                                ref_ids = (
-                                    matching_rows["CC_Reference_ID"]
-                                    .dropna()
-                                    .astype(str)
-                                    .str.strip()
-                                    .unique()
-                                    .tolist()
-                                )
-                                if ref_ids:
-                                    # Save mapping for these specific CC_Reference_IDs (batch-specific)
-                                    save_dept_mappings(ref_ids, row["Dept"])
-                                    # Clear reconciliation cache to force refresh with updated mappings
-                                    st.session_state.pop("reco_df", None)
-                                    st.session_state.pop("current_reco_batch", None)
-
-                # Update session state
-                st.session_state["common_dept_choices"] = {
-                    str(row["Description"]).strip().upper(): row["Dept"]
-                    for _, row in edited_df.iterrows()
-                    if row["Dept"] in {"FBA", "FBM"}
-                }
-                st.session_state["common_apply_flags"] = {
-                    str(row["Description"]).strip().upper(): bool(row["Apply"])
-                    for _, row in edited_df.iterrows()
-                }
+                # Update session state - now using CC_Reference_ID as key
+                if "CC_Reference_ID" in edited_df.columns:
+                    st.session_state["common_dept_choices"] = {
+                        str(row["CC_Reference_ID"]).strip(): row["Dept"]
+                        for _, row in edited_df.iterrows()
+                        if row["Dept"] in {"FBA", "FBM"}
+                        and pd.notna(row.get("CC_Reference_ID"))
+                    }
+                    st.session_state["common_apply_flags"] = {
+                        str(row["CC_Reference_ID"]).strip(): bool(
+                            row.get("Apply", False)
+                        )
+                        for _, row in edited_df.iterrows()
+                        if pd.notna(row.get("CC_Reference_ID"))
+                    }
 
                 # Only process manually selected items if form was submitted
                 apply_rows = (
