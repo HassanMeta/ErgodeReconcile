@@ -3565,10 +3565,42 @@ def render_download_reco() -> None:
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
             # Write each tab to a separate sheet
             if not combined_results.empty:
-                # Remove CC_Reference_ID and PO_Number columns from Results
-                results_to_export = combined_results.drop(
-                    columns=["CC_Reference_ID", "PO_Number"], errors="ignore"
+                # Match the Reco -> Results tab columns (hide internal/helper columns)
+                results_to_export = combined_results.copy()
+
+                # In Reco UI, these columns are removed before display
+                results_columns_to_remove = [
+                    "CC_Fee",
+                    "Total_Deductions",
+                    "Total_CC_Charge",
+                    "Original_PO_Amount_Sum",
+                    "Base_PO_Amount",
+                ]
+                results_to_export = results_to_export.drop(
+                    columns=[
+                        col
+                        for col in results_columns_to_remove
+                        if col in results_to_export.columns
+                    ],
+                    errors="ignore",
                 )
+
+                # Reorder Vendor_Name to be right after Vendor_Prefix (same as UI)
+                if "Vendor_Name" in results_to_export.columns:
+                    cols = list(results_to_export.columns)
+                    if "Vendor_Prefix" in cols and "Vendor_Name" in cols:
+                        prefix_idx = cols.index("Vendor_Prefix")
+                        name_idx = cols.index("Vendor_Name")
+                        cols.pop(name_idx)
+                        cols.insert(prefix_idx + 1, "Vendor_Name")
+                        results_to_export = results_to_export[cols]
+
+                # Keep Batch_ID only when downloading multiple batches
+                if (
+                    len(selected_batches) <= 1
+                    and "Batch_ID" in results_to_export.columns
+                ):
+                    results_to_export = results_to_export.drop(columns=["Batch_ID"])
                 results_to_export.to_excel(writer, sheet_name="Results", index=False)
             if not combined_mapped.empty:
                 combined_mapped.to_excel(writer, sheet_name="Mapped", index=False)
