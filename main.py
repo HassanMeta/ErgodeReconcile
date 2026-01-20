@@ -1884,6 +1884,7 @@ def build_results_df_from_batch(
                         "PO_Amount",
                         "Original_PO_Amount",
                         "Total_Deductions",
+                        "Applied_Amount",
                         "Adjusted_PO_Amount",
                     ]
                     merge_columns = [
@@ -1907,26 +1908,65 @@ def build_results_df_from_batch(
                         po_merge_unique = po_merge_data.drop_duplicates(
                             subset=["PO_Number"], keep="first"
                         )
+                        # Build aggregation dict
+                        agg_dict = {
+                            "Base_PO_Amount": ("PO_Amount", "sum"),
+                            "PO_Transaction_Count": ("PO_Number", "nunique"),
+                            "PO_Number": (
+                                "PO_Number",
+                                lambda x: ", ".join(
+                                    sorted(set(str(v) for v in x if pd.notna(v)))
+                                ),
+                            ),
+                        }
+
+                        # Add Original_PO_Amount aggregation (needed for Comparison_Amount calculation)
+                        if "Original_PO_Amount" in po_merge_unique.columns:
+                            agg_dict["Original_PO_Amount_Sum"] = (
+                                "Original_PO_Amount",
+                                "sum",
+                            )
+                        else:
+                            agg_dict["Original_PO_Amount_Sum"] = ("PO_Amount", "sum")
+
                         po_summary = (
                             po_merge_unique.groupby(results_group_cols, dropna=False)
-                            .agg(
-                                Comparison_Amount=("Comparison_Amount", "sum"),
-                                Base_PO_Amount=("PO_Amount", "sum"),
-                                Original_PO_Amount_Sum=(
-                                    ("Original_PO_Amount", "sum")
-                                    if "Original_PO_Amount" in po_merge_unique.columns
-                                    else ("PO_Amount", "sum")
-                                ),
-                                PO_Transaction_Count=("PO_Number", "nunique"),
-                                PO_Number=(
-                                    "PO_Number",
-                                    lambda x: ", ".join(
-                                        sorted(set(str(v) for v in x if pd.notna(v)))
-                                    ),
-                                ),
-                            )
+                            .agg(**agg_dict)
                             .reset_index()
                         )
+
+                        # Calculate Comparison_Amount: Sum of Applied_Amount if > 0, else Sum of Original_PO_Amount
+                        # Calculate Applied_Amount sum per group
+                        if "Applied_Amount" in po_merge_unique.columns:
+                            applied_sums = (
+                                po_merge_unique.groupby(
+                                    results_group_cols, dropna=False
+                                )
+                                .agg({"Applied_Amount": "sum"})
+                                .reset_index()
+                            )
+                            applied_sums.columns = results_group_cols + [
+                                "Applied_Amount_Sum"
+                            ]
+                            po_summary = po_summary.merge(
+                                applied_sums, on=results_group_cols, how="left"
+                            )
+                            po_summary["Applied_Amount_Sum"] = po_summary[
+                                "Applied_Amount_Sum"
+                            ].fillna(0.0)
+                            # Use Applied_Amount_Sum if > 0, else Original_PO_Amount_Sum
+                            po_summary["Comparison_Amount"] = po_summary.apply(
+                                lambda row: row["Applied_Amount_Sum"]
+                                if row["Applied_Amount_Sum"] > 0
+                                else row["Original_PO_Amount_Sum"],
+                                axis=1,
+                            )
+                            # Drop the temporary Applied_Amount_Sum column
+                            po_summary = po_summary.drop(columns=["Applied_Amount_Sum"])
+                        else:
+                            po_summary["Comparison_Amount"] = po_summary[
+                                "Original_PO_Amount_Sum"
+                            ]
         except Exception:  # pylint: disable=broad-except
             po_summary = pd.DataFrame(
                 columns=results_group_cols
@@ -1943,13 +1983,13 @@ def build_results_df_from_batch(
                 po_summary["Payment_Terms"], errors="coerce"
             ).fillna(0)
 
-        for col in results_group_cols:
-            if col in results_df.columns and col in po_summary.columns:
-                if col == "Payment_Terms":
-                    continue
-                else:
-                    results_df[col] = results_df[col].astype(str).str.strip()
-                    po_summary[col] = po_summary[col].astype(str).str.strip()
+            for col in results_group_cols:
+                if col in results_df.columns and col in po_summary.columns:
+                    if col == "Payment_Terms":
+                        continue
+                    else:
+                        results_df[col] = results_df[col].astype(str).str.strip()
+                        po_summary[col] = po_summary[col].astype(str).str.strip()
 
         results_df = results_df.merge(
             po_summary,
@@ -3183,7 +3223,6 @@ def render_download_reco() -> None:
         all_common = []
         all_unmapped = []
         all_others = []
-        all_analysis_grouped = []
         all_analysis_po = []
         all_analysis_cc = []
 
@@ -3475,12 +3514,6 @@ def render_download_reco() -> None:
                     except Exception:  # pylint: disable=broad-except
                         pass
 
-                    # Grouped Results for Analysis (same as results_df but with all vendors)
-                    if not results_df.empty:
-                        grouped_results = results_df.copy()
-                        grouped_results["Batch_ID"] = batch_id
-                        all_analysis_grouped.append(grouped_results)
-
             except Exception as exc:  # pylint: disable=broad-except
                 st.error(f"Error processing batch {batch_id}: {exc}")
                 continue
@@ -3505,11 +3538,6 @@ def render_download_reco() -> None:
         )
         combined_others = (
             pd.concat(all_others, ignore_index=True) if all_others else pd.DataFrame()
-        )
-        combined_analysis_grouped = (
-            pd.concat(all_analysis_grouped, ignore_index=True)
-            if all_analysis_grouped
-            else pd.DataFrame()
         )
         combined_analysis_po = (
             pd.concat(all_analysis_po, ignore_index=True)
@@ -3537,7 +3565,11 @@ def render_download_reco() -> None:
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
             # Write each tab to a separate sheet
             if not combined_results.empty:
-                combined_results.to_excel(writer, sheet_name="Results", index=False)
+                # Remove CC_Reference_ID and PO_Number columns from Results
+                results_to_export = combined_results.drop(
+                    columns=["CC_Reference_ID", "PO_Number"], errors="ignore"
+                )
+                results_to_export.to_excel(writer, sheet_name="Results", index=False)
             if not combined_mapped.empty:
                 combined_mapped.to_excel(writer, sheet_name="Mapped", index=False)
             if not combined_common.empty:
@@ -3546,11 +3578,7 @@ def render_download_reco() -> None:
                 combined_unmapped.to_excel(writer, sheet_name="Unmapped", index=False)
             if not combined_others.empty:
                 combined_others.to_excel(writer, sheet_name="Others", index=False)
-            # Analysis sheets
-            if not combined_analysis_grouped.empty:
-                combined_analysis_grouped.to_excel(
-                    writer, sheet_name="Analysis_Grouped", index=False
-                )
+            # Analysis sheets (removed Analysis_Grouped as per user request)
             if not combined_analysis_po.empty:
                 combined_analysis_po.to_excel(
                     writer, sheet_name="Analysis_PO_Details", index=False
@@ -3889,6 +3917,7 @@ def render_reco() -> None:
                         "PO_Amount",
                         "Original_PO_Amount",
                         "Total_Deductions",
+                        "Applied_Amount",
                         "Adjusted_PO_Amount",
                     ]
                     # Only include columns that exist
@@ -3915,30 +3944,65 @@ def render_reco() -> None:
                         po_merge_unique = po_merge_data.drop_duplicates(
                             subset=["PO_Number"], keep="first"
                         )
+                        # Build aggregation dict
+                        agg_dict = {
+                            "Base_PO_Amount": (
+                                "PO_Amount",
+                                "sum",
+                            ),  # Base PO amount without CC fee
+                            "PO_Transaction_Count": (
+                                "PO_Number",
+                                "nunique",
+                            ),  # Count unique POs only
+                        }
+
+                        # Add Original_PO_Amount aggregation (needed for Comparison_Amount calculation)
+                        if "Original_PO_Amount" in po_merge_unique.columns:
+                            agg_dict["Original_PO_Amount_Sum"] = (
+                                "Original_PO_Amount",
+                                "sum",
+                            )
+                        else:
+                            agg_dict["Original_PO_Amount_Sum"] = ("PO_Amount", "sum")
+
                         po_summary = (
                             po_merge_unique.groupby(results_group_cols, dropna=False)
-                            .agg(
-                                Comparison_Amount=("Comparison_Amount", "sum"),
-                                Base_PO_Amount=(
-                                    "PO_Amount",
-                                    "sum",
-                                ),  # Base PO amount without CC fee
-                                Original_PO_Amount_Sum=(
-                                    "Original_PO_Amount",
-                                    "sum",
-                                )
-                                if "Original_PO_Amount" in po_merge_unique.columns
-                                else (
-                                    "PO_Amount",
-                                    "sum",
-                                ),  # Original PO amount for CC charge calculation (before deductions)
-                                PO_Transaction_Count=(
-                                    "PO_Number",
-                                    "nunique",
-                                ),  # Count unique POs only
-                            )
+                            .agg(**agg_dict)
                             .reset_index()
                         )
+
+                        # Calculate Comparison_Amount: Sum of Applied_Amount if > 0, else Sum of Original_PO_Amount
+                        # Calculate Applied_Amount sum per group
+                        if "Applied_Amount" in po_merge_unique.columns:
+                            applied_sums = (
+                                po_merge_unique.groupby(
+                                    results_group_cols, dropna=False
+                                )
+                                .agg({"Applied_Amount": "sum"})
+                                .reset_index()
+                            )
+                            applied_sums.columns = results_group_cols + [
+                                "Applied_Amount_Sum"
+                            ]
+                            po_summary = po_summary.merge(
+                                applied_sums, on=results_group_cols, how="left"
+                            )
+                            po_summary["Applied_Amount_Sum"] = po_summary[
+                                "Applied_Amount_Sum"
+                            ].fillna(0.0)
+                            # Use Applied_Amount_Sum if > 0, else Original_PO_Amount_Sum
+                            po_summary["Comparison_Amount"] = po_summary.apply(
+                                lambda row: row["Applied_Amount_Sum"]
+                                if row["Applied_Amount_Sum"] > 0
+                                else row["Original_PO_Amount_Sum"],
+                                axis=1,
+                            )
+                            # Drop the temporary Applied_Amount_Sum column
+                            po_summary = po_summary.drop(columns=["Applied_Amount_Sum"])
+                        else:
+                            po_summary["Comparison_Amount"] = po_summary[
+                                "Original_PO_Amount_Sum"
+                            ]
                     else:
                         po_summary = pd.DataFrame(
                             columns=results_group_cols
@@ -5787,14 +5851,49 @@ def render_reco() -> None:
                                         subset=["PO_Number"], keep="first"
                                     )
                                     po_count = len(vendor_po_unique)
-                                    # Total PO = Sum of (Applied Amount if exists, else Original Amount)
-                                    # Comparison_Amount already has this logic applied
-                                    if "Comparison_Amount" in vendor_po_unique.columns:
-                                        po_total = vendor_po_unique[
-                                            "Comparison_Amount"
-                                        ].sum()
-                                    else:
-                                        po_total = vendor_po_unique["PO_Amount"].sum()
+                                    # Total PO = Sum of Applied_Amount if > 0, else sum of Original_PO_Amount
+                                    applied_sum = 0.0
+                                    original_sum = 0.0
+
+                                    if "Applied_Amount" in vendor_po_unique.columns:
+                                        applied_sum = (
+                                            vendor_po_unique["Applied_Amount"]
+                                            .fillna(0.0)
+                                            .sum()
+                                        )
+                                    elif "Total_Deductions" in vendor_po_unique.columns:
+                                        applied_sum = (
+                                            vendor_po_unique["Total_Deductions"]
+                                            .fillna(0.0)
+                                            .sum()
+                                        )
+
+                                    if "Original_PO_Amount" in vendor_po_unique.columns:
+                                        original_sum = (
+                                            vendor_po_unique["Original_PO_Amount"]
+                                            .fillna(0.0)
+                                            .sum()
+                                        )
+                                    elif (
+                                        "Comparison_Amount" in vendor_po_unique.columns
+                                    ):
+                                        original_sum = (
+                                            vendor_po_unique["Comparison_Amount"]
+                                            .fillna(0.0)
+                                            .sum()
+                                        )
+                                    elif "PO_Amount" in vendor_po_unique.columns:
+                                        original_sum = (
+                                            vendor_po_unique["PO_Amount"]
+                                            .fillna(0.0)
+                                            .sum()
+                                        )
+
+                                    # Use Applied sum if > 0, otherwise use Original sum
+                                    po_total = (
+                                        applied_sum if applied_sum > 0 else original_sum
+                                    )
+
                                     po_total_col1, po_total_col2 = st.columns(2)
                                     with po_total_col1:
                                         st.metric("PO Count", po_count)
@@ -5802,7 +5901,7 @@ def render_reco() -> None:
                                         st.metric(
                                             "Total PO",
                                             f"${po_total:,.2f}",
-                                            help="Sum of Applied Amount (if exists) or Original Amount for each PO",
+                                            help="Sum of Applied Amount (if > 0), otherwise sum of Original Amount",
                                         )
                                 else:
                                     po_total_col1, po_total_col2 = st.columns(2)
