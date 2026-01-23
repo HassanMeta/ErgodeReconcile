@@ -2003,16 +2003,22 @@ def build_results_df_from_batch(
             }
         )
         results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
-        results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
+        if "Base_PO_Amount" in results_df.columns:
+            results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
+        else:
+            results_df["Base_PO_Amount"] = 0.0
         if "Original_PO_Amount_Sum" in results_df.columns:
             results_df["Original_PO_Amount_Sum"] = results_df[
                 "Original_PO_Amount_Sum"
             ].fillna(0.0)
         else:
             results_df["Original_PO_Amount_Sum"] = results_df["Base_PO_Amount"]
-        results_df["PO_Transaction_Count"] = (
-            results_df["PO_Transaction_Count"].fillna(0).astype(int)
-        )
+        if "PO_Transaction_Count" in results_df.columns:
+            results_df["PO_Transaction_Count"] = (
+                results_df["PO_Transaction_Count"].fillna(0).astype(int)
+            )
+        else:
+            results_df["PO_Transaction_Count"] = 0
         # Fill PO_Number and CC_Reference_ID with empty string if not present
         if "PO_Number" in results_df.columns:
             results_df["PO_Number"] = results_df["PO_Number"].fillna("")
@@ -4101,7 +4107,10 @@ def render_reco() -> None:
             }
         )
         results_df["Total_PO_Amount"] = results_df["Total_PO_Amount"].fillna(0.0)
-        results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
+        if "Base_PO_Amount" in results_df.columns:
+            results_df["Base_PO_Amount"] = results_df["Base_PO_Amount"].fillna(0.0)
+        else:
+            results_df["Base_PO_Amount"] = 0.0
         # Store original PO amount sum for CC charge calculation
         if "Original_PO_Amount_Sum" in results_df.columns:
             results_df["Original_PO_Amount_Sum"] = results_df[
@@ -4109,9 +4118,12 @@ def render_reco() -> None:
             ].fillna(0.0)
         else:
             results_df["Original_PO_Amount_Sum"] = results_df["Base_PO_Amount"]
-        results_df["PO_Transaction_Count"] = (
-            results_df["PO_Transaction_Count"].fillna(0).astype(int)
-        )
+        if "PO_Transaction_Count" in results_df.columns:
+            results_df["PO_Transaction_Count"] = (
+                results_df["PO_Transaction_Count"].fillna(0).astype(int)
+            )
+        else:
+            results_df["PO_Transaction_Count"] = 0
 
         # Calculate Total_Deductions per vendor/dept
         if not deductions_df.empty:
