@@ -4580,7 +4580,7 @@ def render_reco() -> None:
                     "common_dept_choices", {}
                 )
 
-                # Auto-assign FBM if amount < 100 for individual rows
+                # Auto-assign dept by amount: <100 FBM, >100 FBA (vendor is common in Common tab)
                 def assign_dept(row):
                     # Check saved mapping by CC_Reference_ID first
                     if "CC_Reference_ID" in row.index and pd.notna(
@@ -4598,12 +4598,14 @@ def render_reco() -> None:
                         if desc_key in saved_dept_map:
                             return saved_dept_map[desc_key]
 
-                    # Auto-assign FBM if amount < 100
+                    # Amount-based auto-assign (vendor is common in Common tab)
                     if "Amount" in row.index and pd.notna(row["Amount"]):
                         try:
                             amount_val = float(row["Amount"])
                             if amount_val < 100:
                                 return "FBM"
+                            if amount_val > 100:
+                                return "FBA"
                         except (ValueError, TypeError):
                             pass
 
@@ -4621,7 +4623,16 @@ def render_reco() -> None:
                 existing_apply_flags: dict[str, bool] = st.session_state.setdefault(
                     "common_apply_flags", {}
                 )
-                # Auto-apply for amounts < 100
+                # Auto-apply for amounts < 100 (FBM) or > 100 (FBA when common)
+                def should_auto_apply(row):
+                    if not pd.notna(row.get("Amount")):
+                        return False
+                    try:
+                        amt = float(row["Amount"])
+                        return amt < 100 or amt > 100
+                    except (ValueError, TypeError):
+                        return False
+
                 display_df["Apply"] = display_df.apply(
                     lambda row: (
                         bool(
@@ -4629,24 +4640,31 @@ def render_reco() -> None:
                                 str(row["Description"]).strip().upper(), False
                             )
                         )
-                        or (pd.notna(row["Amount"]) and float(row["Amount"]) < 100)
+                        or should_auto_apply(row)
                     ),
                     axis=1,
                 )
 
-                # Auto-process descriptions with sum < 100 immediately (before showing form)
+                # Auto-process: amount < 100 as FBM, amount > 100 as FBA (vendor common)
+                amount_numeric = pd.to_numeric(display_df["Amount"], errors="coerce")
                 auto_process_mask = display_df["Amount"].notna() & (
-                    pd.to_numeric(display_df["Amount"], errors="coerce") < 100
+                    (amount_numeric < 100) | (amount_numeric > 100)
                 )
                 auto_process_rows = display_df[auto_process_mask].copy()
 
-                # Process auto-FBM items immediately if any exist
+                # Process auto-assigned items immediately if any exist
                 if not auto_process_rows.empty:
-                    # Force FBM and Apply for auto-process items
-                    auto_process_rows["Dept"] = "FBM"
+                    # Set dept by amount: <100 FBM, >100 FBA
+                    def auto_dept(row):
+                        try:
+                            amt = float(row["Amount"])
+                            return "FBM" if amt < 100 else "FBA"
+                        except (ValueError, TypeError):
+                            return "FBM"
+                    auto_process_rows["Dept"] = auto_process_rows.apply(auto_dept, axis=1)
                     auto_process_rows["Apply"] = True
 
-                    # Process auto-FBM items directly
+                    # Process auto-assigned items directly
                     try:
                         mappings_df = read_parquet_with_fallback(Path("data/mappings"))
                     except Exception as exc:  # pylint: disable=broad-except
@@ -4702,7 +4720,8 @@ def render_reco() -> None:
                         for row in auto_process_rows.to_dict("records"):
                             description_value = str(row["Description"] or "").strip()
                             description_norm = description_value.upper()
-                            dept_value = "FBM"  # Always FBM for auto-processed
+                            # Dept set by amount: <100 FBM, >100 FBA (vendor common)
+                            dept_value = row.get("Dept", "FBM")
                             amount_value = row["Amount"]
                             amount_numeric = pd.to_numeric(
                                 pd.Series([amount_value], dtype="object"),
@@ -4725,14 +4744,26 @@ def render_reco() -> None:
                             if matching_common_rows.empty:
                                 continue
 
-                            # Get prefix and payment terms (prioritize FBM)
+                            # Filter to only refs with same amount-based dept (per ref_id)
+                            amt_col = "Amount" if "Amount" in matching_common_rows.columns else amt_column
+                            if amt_col in matching_common_rows.columns:
+                                amt_vals = pd.to_numeric(matching_common_rows[amt_col], errors="coerce")
+                                if dept_value == "FBM":
+                                    same_dept_mask = amt_vals < 100
+                                else:
+                                    same_dept_mask = amt_vals > 100
+                                matching_common_rows = matching_common_rows.loc[same_dept_mask].copy()
+                            if matching_common_rows.empty:
+                                continue
+
+                            # Get prefix and payment terms (use dept: FBM or FBA)
                             prefix_candidates = prefix_lookup.get(description_norm, [])
                             chosen_prefix = ""
                             payment_terms_value: object = pd.NA
                             vendor_name_value: object = pd.NA
 
-                            # Always search for FBM dept for auto-processed items
-                            search_dept = "FBM"
+                            # Search for dept (FBM or FBA) for auto-processed items
+                            search_dept = dept_value
                             for candidate in prefix_candidates:
                                 matched_rows = master_df[
                                     (master_df.get("PREFIX", "") == candidate)
@@ -4754,15 +4785,15 @@ def render_reco() -> None:
                                     master_df.get("PREFIX", "") == chosen_prefix
                                 ]
                                 if not matched_rows.empty:
-                                    # Try to get FBM payment terms
-                                    fbm_rows = matched_rows[
-                                        matched_rows.get("DEPT", "") == "FBM"
+                                    # Try to get dept (FBM or FBA) payment terms
+                                    dept_rows = matched_rows[
+                                        matched_rows.get("DEPT", "") == dept_value
                                     ]
-                                    if not fbm_rows.empty:
-                                        payment_terms_value = fbm_rows.iloc[0].get(
+                                    if not dept_rows.empty:
+                                        payment_terms_value = dept_rows.iloc[0].get(
                                             "PAYMENT TERMS", pd.NA
                                         )
-                                        vendor_name_value = fbm_rows.iloc[0].get(
+                                        vendor_name_value = dept_rows.iloc[0].get(
                                             "VENDOR_NAME", pd.NA
                                         )
                                     else:
@@ -4776,8 +4807,10 @@ def render_reco() -> None:
                             if not chosen_prefix:
                                 continue
 
-                            # Set category to ONLY FBM for auto-processed items
-                            category_value = "ONLY FBM"
+                            # Set category based on dept (ONLY FBM or ONLY FBA)
+                            category_value = (
+                                "ONLY FBA" if dept_value == "FBA" else "ONLY FBM"
+                            )
 
                             # Get all reference IDs for this description
                             matching_ref_ids = (
@@ -4910,7 +4943,7 @@ def render_reco() -> None:
                             if len(auto_processed_descriptions) > 5:
                                 summary_descs += ", ..."
                             st.success(
-                                f"Auto-processed {len(auto_processed_descriptions)} description(s) with sum < $100 as FBM: "
+                                f"Auto-processed {len(auto_processed_descriptions)} transaction(s) (<$100 FBM, >$100 FBA): "
                                 + summary_descs
                             )
                             # Rerun to refresh the page
@@ -4942,7 +4975,7 @@ def render_reco() -> None:
                                 "Dept",
                                 options=["FBA", "FBM"],
                                 required=False,
-                                help="Choose the department. Amounts < $100 auto-assign FBM.",
+                                help="< $100 auto FBM; > $100 auto FBA (when vendor common).",
                             ),
                             "Vendor_Prefix": st.column_config.TextColumn(
                                 "Vendor Prefix",
@@ -4952,7 +4985,7 @@ def render_reco() -> None:
                             "Apply": st.column_config.CheckboxColumn(
                                 "Apply",
                                 help=(
-                                    "Auto-checked for amounts < $100. Check to process this individual transaction."
+                                    "Auto-checked for <$100 (FBM) or >$100 (FBA). Check to process."
                                 ),
                             ),
                         },
@@ -5013,14 +5046,25 @@ def render_reco() -> None:
                 )
 
                 if not apply_rows.empty:
-                    # Auto-assign FBM for amounts < 100 if not already assigned
+                    # Auto-assign by amount: <100 FBM, >100 FBA (when common)
                     for idx, row in apply_rows.iterrows():
-                        if pd.notna(row["Amount"]) and float(row["Amount"]) < 100:
-                            apply_rows.loc[idx, "Dept"] = "FBM"
-                            st.info(
-                                f"Auto-assigned FBM for description '{row['Description']}' "
-                                f"(sum amount ${row['Amount']:.2f} < $100)"
-                            )
+                        if pd.notna(row["Amount"]):
+                            try:
+                                amt = float(row["Amount"])
+                                if amt < 100:
+                                    apply_rows.loc[idx, "Dept"] = "FBM"
+                                    st.info(
+                                        f"Auto-assigned FBM for description '{row['Description']}' "
+                                        f"(amount ${row['Amount']:.2f} < $100)"
+                                    )
+                                elif amt > 100:
+                                    apply_rows.loc[idx, "Dept"] = "FBA"
+                                    st.info(
+                                        f"Auto-assigned FBA for description '{row['Description']}' "
+                                        f"(amount ${row['Amount']:.2f} > $100, vendor common)"
+                                    )
+                            except (ValueError, TypeError):
+                                pass
 
                     missing_dept_refs = (
                         apply_rows[~apply_rows["Dept"].isin({"FBA", "FBM"})][
@@ -5100,12 +5144,13 @@ def render_reco() -> None:
                                     errors="coerce",
                                 ).iloc[0]
 
-                                # If amount < 100, force FBM
-                                if (
-                                    pd.notna(amount_numeric)
-                                    and float(amount_numeric) < 100
-                                ):
-                                    dept_value = "FBM"
+                                # Amount-based dept: <100 FBM, >100 FBA (when common)
+                                if pd.notna(amount_numeric):
+                                    amt_f = float(amount_numeric)
+                                    if amt_f < 100:
+                                        dept_value = "FBM"
+                                    elif amt_f > 100:
+                                        dept_value = "FBA"
 
                                 if dept_value not in {"FBA", "FBM"}:
                                     continue
@@ -5133,7 +5178,7 @@ def render_reco() -> None:
                                 chosen_prefix = ""
                                 payment_terms_value: object = pd.NA
                                 vendor_name_value: object = pd.NA
-                                # When amount < 100, prioritize FBM matches
+                                # Use dept_value (FBM or FBA based on amount)
                                 search_dept = dept_value
                                 for candidate in prefix_candidates:
                                     matched_rows = master_df[
@@ -5155,7 +5200,7 @@ def render_reco() -> None:
                                         master_df.get("PREFIX", "") == chosen_prefix
                                     ]
                                     if not matched_rows.empty:
-                                        # If amount < 100, prioritize FBM dept match
+                                        # Prefer dept match (FBM or FBA)
                                         if (
                                             "DEPT" in matched_rows.columns
                                             and dept_value
@@ -5173,40 +5218,29 @@ def render_reco() -> None:
                                                 0
                                             ].get("VENDOR_NAME", pd.NA)
                                         else:
-                                            # If amount < 100, try to get FBM payment terms
-                                            if (
-                                                pd.notna(amount_numeric)
-                                                and float(amount_numeric) < 100
-                                            ):
-                                                fbm_rows = matched_rows[
-                                                    matched_rows.get("DEPT", "")
-                                                    == "FBM"
-                                                ]
-                                                if not fbm_rows.empty:
-                                                    payment_terms_value = fbm_rows.iloc[
-                                                        0
-                                                    ].get("PAYMENT TERMS", pd.NA)
-                                                    vendor_name_value = fbm_rows.iloc[
-                                                        0
-                                                    ].get("VENDOR_NAME", pd.NA)
-                                                else:
-                                                    payment_terms_value = (
-                                                        matched_rows.iloc[0].get(
-                                                            "PAYMENT TERMS", pd.NA
-                                                        )
-                                                    )
-                                                    vendor_name_value = (
-                                                        matched_rows.iloc[0].get(
-                                                            "VENDOR_NAME", pd.NA
-                                                        )
-                                                    )
-                                            else:
-                                                payment_terms_value = matched_rows.iloc[
+                                            # Try to get dept (FBM or FBA) payment terms
+                                            dept_rows = matched_rows[
+                                                matched_rows.get("DEPT", "")
+                                                == dept_value
+                                            ]
+                                            if not dept_rows.empty:
+                                                payment_terms_value = dept_rows.iloc[
                                                     0
                                                 ].get("PAYMENT TERMS", pd.NA)
-                                                vendor_name_value = matched_rows.iloc[
+                                                vendor_name_value = dept_rows.iloc[
                                                     0
                                                 ].get("VENDOR_NAME", pd.NA)
+                                            else:
+                                                payment_terms_value = (
+                                                    matched_rows.iloc[0].get(
+                                                        "PAYMENT TERMS", pd.NA
+                                                    )
+                                                )
+                                                vendor_name_value = (
+                                                    matched_rows.iloc[0].get(
+                                                        "VENDOR_NAME", pd.NA
+                                                    )
+                                                )
 
                                 if not chosen_prefix:
                                     missing_prefix_descriptions.append(
@@ -5214,19 +5248,12 @@ def render_reco() -> None:
                                     )
                                     continue
 
-                                # If amount < 100, ensure it's FBM and set category accordingly
-                                if (
-                                    pd.notna(amount_numeric)
-                                    and float(amount_numeric) < 100
-                                ):
-                                    dept_value = "FBM"
-                                    category_value = "ONLY FBM"
-                                else:
-                                    category_value = (
-                                        "ONLY FBA"
-                                        if dept_value == "FBA"
-                                        else "ONLY FBM"
-                                    )
+                                # Set category from dept (FBM or FBA based on amount)
+                                category_value = (
+                                    "ONLY FBA"
+                                    if dept_value == "FBA"
+                                    else "ONLY FBM"
+                                )
 
                                 # Get all reference IDs for this description
                                 matching_ref_ids = (
