@@ -1,7 +1,7 @@
+import re
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-import re
 
 import numpy as np
 import pandas as pd
@@ -4623,6 +4623,7 @@ def render_reco() -> None:
                 existing_apply_flags: dict[str, bool] = st.session_state.setdefault(
                     "common_apply_flags", {}
                 )
+
                 # Auto-apply for amounts < 100 (FBM) or > 100 (FBA when common)
                 def should_auto_apply(row):
                     if not pd.notna(row.get("Amount")):
@@ -4661,7 +4662,10 @@ def render_reco() -> None:
                             return "FBM" if amt < 100 else "FBA"
                         except (ValueError, TypeError):
                             return "FBM"
-                    auto_process_rows["Dept"] = auto_process_rows.apply(auto_dept, axis=1)
+
+                    auto_process_rows["Dept"] = auto_process_rows.apply(
+                        auto_dept, axis=1
+                    )
                     auto_process_rows["Apply"] = True
 
                     # Process auto-assigned items directly
@@ -4745,14 +4749,22 @@ def render_reco() -> None:
                                 continue
 
                             # Filter to only refs with same amount-based dept (per ref_id)
-                            amt_col = "Amount" if "Amount" in matching_common_rows.columns else amt_column
+                            amt_col = (
+                                "Amount"
+                                if "Amount" in matching_common_rows.columns
+                                else amt_column
+                            )
                             if amt_col in matching_common_rows.columns:
-                                amt_vals = pd.to_numeric(matching_common_rows[amt_col], errors="coerce")
+                                amt_vals = pd.to_numeric(
+                                    matching_common_rows[amt_col], errors="coerce"
+                                )
                                 if dept_value == "FBM":
                                     same_dept_mask = amt_vals < 100
                                 else:
                                     same_dept_mask = amt_vals > 100
-                                matching_common_rows = matching_common_rows.loc[same_dept_mask].copy()
+                                matching_common_rows = matching_common_rows.loc[
+                                    same_dept_mask
+                                ].copy()
                             if matching_common_rows.empty:
                                 continue
 
@@ -5231,16 +5243,12 @@ def render_reco() -> None:
                                                     0
                                                 ].get("VENDOR_NAME", pd.NA)
                                             else:
-                                                payment_terms_value = (
-                                                    matched_rows.iloc[0].get(
-                                                        "PAYMENT TERMS", pd.NA
-                                                    )
-                                                )
-                                                vendor_name_value = (
-                                                    matched_rows.iloc[0].get(
-                                                        "VENDOR_NAME", pd.NA
-                                                    )
-                                                )
+                                                payment_terms_value = matched_rows.iloc[
+                                                    0
+                                                ].get("PAYMENT TERMS", pd.NA)
+                                                vendor_name_value = matched_rows.iloc[
+                                                    0
+                                                ].get("VENDOR_NAME", pd.NA)
 
                                 if not chosen_prefix:
                                     missing_prefix_descriptions.append(
@@ -5250,9 +5258,7 @@ def render_reco() -> None:
 
                                 # Set category from dept (FBM or FBA based on amount)
                                 category_value = (
-                                    "ONLY FBA"
-                                    if dept_value == "FBA"
-                                    else "ONLY FBM"
+                                    "ONLY FBA" if dept_value == "FBA" else "ONLY FBM"
                                 )
 
                                 # Get all reference IDs for this description
