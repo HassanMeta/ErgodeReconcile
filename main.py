@@ -280,6 +280,18 @@ def write_parquet(df: pd.DataFrame, file_path: Path) -> None:
             df_to_write["Payment_Terms"], errors="coerce"
         )
 
+    # Convert CC FEE to numeric if it exists
+    if "CC FEE" in df_to_write.columns:
+        df_to_write["CC FEE"] = pd.to_numeric(
+            df_to_write["CC FEE"], errors="coerce"
+        ).fillna(0.0)
+
+    # Convert PAYMENT TERMS to numeric if it exists
+    if "PAYMENT TERMS" in df_to_write.columns:
+        df_to_write["PAYMENT TERMS"] = pd.to_numeric(
+            df_to_write["PAYMENT TERMS"], errors="coerce"
+        )
+
     # Convert string columns to ensure they're not mixed types (bool, int, etc.)
     string_columns = [
         "Vendor_Prefix",
@@ -946,7 +958,11 @@ def render_masters() -> None:
                     )
                     updated_master = pd.concat(
                         [master_df, new_entry], ignore_index=True
-                    ).fillna("")
+                    )
+                    # Fill NaN only in string columns; keep numeric columns intact
+                    for col in updated_master.columns:
+                        if col not in ("CC FEE", "PAYMENT TERMS"):
+                            updated_master[col] = updated_master[col].fillna("")
                     try:
                         write_parquet(updated_master, master_path)
                     except Exception as exc:  # pylint: disable=broad-except
