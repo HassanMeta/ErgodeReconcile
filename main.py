@@ -859,6 +859,17 @@ def render_masters() -> None:
                 master_df[column] = pd.NA
         master_df = master_df[master_columns]
 
+        # Ensure CC FEE is always float64 to prevent mixed-type parquet errors
+        if "CC FEE" in master_df.columns:
+            master_df["CC FEE"] = pd.to_numeric(
+                master_df["CC FEE"], errors="coerce"
+            ).fillna(0.0)
+        # Ensure PAYMENT TERMS is always numeric
+        if "PAYMENT TERMS" in master_df.columns:
+            master_df["PAYMENT TERMS"] = pd.to_numeric(
+                master_df["PAYMENT TERMS"], errors="coerce"
+            ).fillna(0)
+
         success_message = st.session_state.pop("vendor_master_success", None)
         if success_message:
             st.success(success_message)
@@ -1204,6 +1215,162 @@ def render_masters() -> None:
                             else:  # pragma: no cover
                                 st.experimental_rerun()
 
+        with st.expander("Upload Vendor Master CSV", expanded=False):
+            st.caption(
+                "Upload a CSV file with columns: **PREFIX, VENDOR_NAME, CATEGORY, DEPT, PAYMENT TERMS** (and optionally **CC FEE**). "
+                "Data will be cleaned (trimmed, spaces collapsed, uppercased) and **replace** the current master."
+            )
+            master_upload_error = st.session_state.pop(
+                "master_upload_error", None
+            )
+            if master_upload_error:
+                st.error(master_upload_error)
+            master_upload_success = st.session_state.pop(
+                "master_upload_success", None
+            )
+            if master_upload_success:
+                st.success(master_upload_success)
+
+            master_upload_counter = st.session_state.get(
+                "master_upload_counter", 0
+            )
+            master_csv_file = st.file_uploader(
+                "Choose Master CSV file",
+                type=["csv"],
+                accept_multiple_files=False,
+                key=f"master_csv_upload_{master_upload_counter}",
+            )
+            if master_csv_file is not None:
+                try:
+                    uploaded_master_df = pd.read_csv(master_csv_file)
+                except Exception as exc:
+                    st.error(f"Unable to read CSV file: {exc}")
+                    uploaded_master_df = None
+
+                if uploaded_master_df is not None:
+                    # Normalize column names: strip and uppercase
+                    uploaded_master_df.columns = (
+                        uploaded_master_df.columns.str.strip().str.upper()
+                    )
+
+                    # Validate required columns
+                    required_master_cols = [
+                        "PREFIX",
+                        "VENDOR_NAME",
+                        "CATEGORY",
+                        "DEPT",
+                        "PAYMENT TERMS",
+                    ]
+                    missing_cols = [
+                        c
+                        for c in required_master_cols
+                        if c not in uploaded_master_df.columns
+                    ]
+                    if missing_cols:
+                        st.error(
+                            f"Missing required columns: {', '.join(missing_cols)}. "
+                            f"Found columns: {', '.join(uploaded_master_df.columns)}"
+                        )
+                    else:
+                        st.info(
+                            f"Found {len(uploaded_master_df)} rows. Preview after cleaning:"
+                        )
+
+                        # Clean text columns: trim, collapse spaces, uppercase
+                        text_cols = [
+                            "PREFIX",
+                            "VENDOR_NAME",
+                            "CATEGORY",
+                            "DEPT",
+                        ]
+                        for col in text_cols:
+                            if col in uploaded_master_df.columns:
+                                uploaded_master_df[col] = (
+                                    uploaded_master_df[col]
+                                    .astype(str)
+                                    .str.replace(
+                                        r"\s+", " ", regex=True
+                                    )
+                                    .str.strip()
+                                    .str.upper()
+                                )
+                                # Clean NaN string representations
+                                uploaded_master_df[col] = (
+                                    uploaded_master_df[col].replace(
+                                        {"NAN": "", "NONE": "", "<NA>": ""}
+                                    )
+                                )
+
+                        # Clean PAYMENT TERMS to integer
+                        if "PAYMENT TERMS" in uploaded_master_df.columns:
+                            uploaded_master_df["PAYMENT TERMS"] = (
+                                pd.to_numeric(
+                                    uploaded_master_df["PAYMENT TERMS"],
+                                    errors="coerce",
+                                )
+                                .fillna(0)
+                                .astype(int)
+                            )
+
+                        # Clean CC FEE to float (optional column)
+                        if "CC FEE" in uploaded_master_df.columns:
+                            uploaded_master_df["CC FEE"] = (
+                                pd.to_numeric(
+                                    uploaded_master_df["CC FEE"],
+                                    errors="coerce",
+                                ).fillna(0.0)
+                            )
+                        else:
+                            uploaded_master_df["CC FEE"] = 0.0
+
+                        # Keep only expected columns in order
+                        final_cols = [
+                            c
+                            for c in master_columns
+                            if c in uploaded_master_df.columns
+                        ]
+                        uploaded_master_df = uploaded_master_df[final_cols]
+
+                        st.dataframe(
+                            uploaded_master_df.head(10),
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+                        st.caption(
+                            f"Showing first 10 of {len(uploaded_master_df)} rows."
+                        )
+
+                        with st.form("master_csv_upload_form"):
+                            st.warning(
+                                "⚠️ This will **replace** the entire vendor master with the uploaded data."
+                            )
+                            confirm_master_upload = st.form_submit_button(
+                                "Replace Vendor Master",
+                                type="primary",
+                            )
+
+                        if confirm_master_upload:
+                            try:
+                                write_parquet(
+                                    uploaded_master_df, master_path
+                                )
+                                st.session_state[
+                                    "master_upload_success"
+                                ] = (
+                                    f"✅ Vendor master replaced with {len(uploaded_master_df)} entries."
+                                )
+                                st.session_state[
+                                    "master_upload_counter"
+                                ] = master_upload_counter + 1
+                            except Exception as exc:
+                                st.session_state["master_upload_error"] = (
+                                    f"Unable to save vendor master file: {exc}"
+                                )
+                            if hasattr(st, "rerun"):
+                                st.rerun()
+                            else:
+                                st.experimental_rerun()
+
         st.markdown("### Existing Vendor Master Entries")
         st.caption(
             "View and edit Payment Terms and CC Fee for existing vendors. "
@@ -1297,11 +1464,167 @@ def render_masters() -> None:
         except FileNotFoundError:
             mapping_df = pd.DataFrame()
             st.warning(
-                "Vendor mapping file not found. Upload the file to populate this view."
+                "Vendor mapping file not found. Upload a CSV to populate this view."
             )
         except Exception as exc:  # pylint: disable=broad-except
             mapping_df = pd.DataFrame()
             st.error(f"Unable to read vendor mapping file: {exc}")
+
+        mapping_upload_error = st.session_state.pop("mapping_upload_error", None)
+        if mapping_upload_error:
+            st.error(mapping_upload_error)
+        mapping_upload_success = st.session_state.pop(
+            "mapping_upload_success", None
+        )
+        if mapping_upload_success:
+            st.success(mapping_upload_success)
+
+        with st.expander("Upload Description Mapping CSV", expanded=False):
+            st.caption(
+                "Upload a CSV file with columns: **DESCRIPTION, PREFIX**. "
+                "The DESCRIPTION column is cleaned **exactly** like CC Description "
+                "(spaces collapsed, trimmed) so reconciliation matching works correctly. "
+                "PREFIX is uppercased. Duplicates are removed."
+            )
+
+            mapping_upload_counter = st.session_state.get(
+                "mapping_upload_counter", 0
+            )
+            mapping_csv_file = st.file_uploader(
+                "Choose Mapping CSV file",
+                type=["csv"],
+                accept_multiple_files=False,
+                key=f"mapping_csv_upload_{mapping_upload_counter}",
+            )
+            if mapping_csv_file is not None:
+                try:
+                    uploaded_mapping_df = pd.read_csv(mapping_csv_file)
+                except Exception as exc:
+                    st.error(f"Unable to read CSV file: {exc}")
+                    uploaded_mapping_df = None
+
+                if uploaded_mapping_df is not None:
+                    # Normalize column names: strip and uppercase
+                    uploaded_mapping_df.columns = (
+                        uploaded_mapping_df.columns.str.strip().str.upper()
+                    )
+
+                    # Validate required columns
+                    required_mapping_cols = ["DESCRIPTION", "PREFIX"]
+                    missing_cols = [
+                        c
+                        for c in required_mapping_cols
+                        if c not in uploaded_mapping_df.columns
+                    ]
+                    if missing_cols:
+                        st.error(
+                            f"Missing required columns: {', '.join(missing_cols)}. "
+                            f"Found columns: {', '.join(uploaded_mapping_df.columns)}"
+                        )
+                    else:
+                        # --- Clean DESCRIPTION ---
+                        # Must match CC_Description cleaning from CC Data upload:
+                        #   1) collapse multiple spaces to single space
+                        #   2) strip leading/trailing spaces
+                        # NOTE: Do NOT uppercase here — stored as-is, uppercased
+                        # only at comparison time (same as CC_Description)
+                        uploaded_mapping_df["DESCRIPTION"] = (
+                            uploaded_mapping_df["DESCRIPTION"]
+                            .astype(str)
+                            .str.replace(r"\s+", " ", regex=True)
+                            .str.strip()
+                        )
+                        # Clean NaN string representations
+                        uploaded_mapping_df["DESCRIPTION"] = (
+                            uploaded_mapping_df["DESCRIPTION"].replace(
+                                {"nan": "", "None": "", "<NA>": ""}
+                            )
+                        )
+
+                        # --- Clean PREFIX ---
+                        # Uppercase to match master parquet
+                        uploaded_mapping_df["PREFIX"] = (
+                            uploaded_mapping_df["PREFIX"]
+                            .astype(str)
+                            .str.replace(r"\s+", " ", regex=True)
+                            .str.strip()
+                            .str.upper()
+                        )
+                        uploaded_mapping_df["PREFIX"] = (
+                            uploaded_mapping_df["PREFIX"].replace(
+                                {"NAN": "", "NONE": "", "<NA>": ""}
+                            )
+                        )
+
+                        # Keep only required columns
+                        uploaded_mapping_df = uploaded_mapping_df[
+                            required_mapping_cols
+                        ]
+
+                        # Remove rows where DESCRIPTION or PREFIX is empty
+                        uploaded_mapping_df = uploaded_mapping_df[
+                            (uploaded_mapping_df["DESCRIPTION"] != "")
+                            & (uploaded_mapping_df["PREFIX"] != "")
+                        ].copy()
+
+                        # Remove exact duplicates
+                        before_dedup = len(uploaded_mapping_df)
+                        uploaded_mapping_df = uploaded_mapping_df.drop_duplicates()
+                        after_dedup = len(uploaded_mapping_df)
+                        dupes_removed = before_dedup - after_dedup
+
+                        st.info(
+                            f"Found {len(uploaded_mapping_df)} valid rows"
+                            + (
+                                f" ({dupes_removed} duplicates removed)."
+                                if dupes_removed > 0
+                                else "."
+                            )
+                        )
+                        st.dataframe(
+                            uploaded_mapping_df.head(10),
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+                        st.caption(
+                            f"Showing first 10 of {len(uploaded_mapping_df)} rows."
+                        )
+
+                        with st.form("mapping_csv_upload_form"):
+                            st.warning(
+                                "⚠️ This will **replace** the entire description mapping with the uploaded data."
+                            )
+                            confirm_mapping_upload = st.form_submit_button(
+                                "Replace Description Mapping",
+                                type="primary",
+                            )
+
+                        if confirm_mapping_upload:
+                            try:
+                                write_parquet(
+                                    uploaded_mapping_df, mapping_path
+                                )
+                                st.session_state[
+                                    "mapping_upload_success"
+                                ] = (
+                                    f"✅ Description mapping replaced with {len(uploaded_mapping_df)} entries."
+                                )
+                                st.session_state[
+                                    "mapping_upload_counter"
+                                ] = mapping_upload_counter + 1
+                            except Exception as exc:
+                                st.session_state["mapping_upload_error"] = (
+                                    f"Unable to save mapping file: {exc}"
+                                )
+                            if hasattr(st, "rerun"):
+                                st.rerun()
+                            else:
+                                st.experimental_rerun()
+
+        st.markdown("### Existing Description Mappings")
+        st.caption(
+            f"{len(mapping_df)} entries mapping CC descriptions to vendor prefixes."
+        )
         st.dataframe(mapping_df, hide_index=True, use_container_width=True)
 
     with tab3:
